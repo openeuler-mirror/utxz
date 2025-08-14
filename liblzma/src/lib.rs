@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
-
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
