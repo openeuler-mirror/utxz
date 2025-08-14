@@ -1,0 +1,6 @@
+[package]
+name = "liblzma"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
