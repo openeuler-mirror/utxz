@@ -6,6 +6,10 @@
 
 pub mod common;
 pub mod mythread;
+pub mod sysdefs;
+pub mod tuklib_cpucores;
 
 pub use common::*;
 pub use mythread::*;
+pub use sysdefs::*;
+pub use tuklib_cpucores::*;
