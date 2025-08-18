@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
 pub fn conv32le(num: u32) -> u32 {
     num
 }
@@ -35,7 +34,6 @@ fn write32ne(buf: &mut [u8], num: u32) {
     buf[0..4].copy_from_slice(&bytes); // 只写入前4字节
 }
 
-
 fn read32ne(buf: &[u8]) -> u32 {
     if buf.len() < 4 {
         let mut result: u32 = 0;
@@ -54,4 +52,3 @@ pub fn read32le(buf: &[u8]) -> u32 {
 pub fn write32le(buf: &mut [u8], num: u32) {
     write32ne(buf, conv32le(num));
 }
-
