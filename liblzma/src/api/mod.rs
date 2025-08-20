@@ -3,3 +3,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
+mod version;
+mod vli;
+
+pub use version::*;
+pub use vli::*;
