@@ -4,3 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+libc = "0.2.173"
+lazy_static = "1.4"
+common = { path = "../common" }
+num_enum = { version = "0.7.3" }
+byteorder = "1.4"
