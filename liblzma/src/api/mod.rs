@@ -5,9 +5,11 @@
  */
 
 mod bcj;
+mod check;
 mod version;
 mod vli;
 
 pub use bcj::*;
+pub use check::*;
 pub use version::*;
 pub use vli::*;
