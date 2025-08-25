@@ -4,4 +4,5 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+pub type LzmaBool = u8;
 pub type LzmaReservedEnum = u32;
