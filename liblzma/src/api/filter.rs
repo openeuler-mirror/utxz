@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use std::any::Any;
-
 use crate::api::LzmaVli;
 
 use super::{LzmaOptionsBcj, LzmaOptionsDelta, LzmaOptionsLzma};
@@ -45,18 +43,10 @@ impl LzmaOptionsType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LzmaFilter {
     pub id: LzmaVli,
     pub options: Option<LzmaOptionsType>,
-}
-impl Default for LzmaFilter {
-    fn default() -> Self {
-        LzmaFilter {
-            id: LzmaVli::default(), // 假设 LzmaVli 实现了 Default
-            options: None,          // Option 类型默认是 None
-        }
-    }
 }
 
 pub const LZMA_STR_ALL_FILTERS: u32 = 0x01;
