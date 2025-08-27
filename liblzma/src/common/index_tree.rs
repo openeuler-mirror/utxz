@@ -8,7 +8,7 @@ use crate::api::{LzmaStreamFlags, LzmaVli};
 use std::sync::{Arc, Mutex, Weak};
 
 /// AVL tree to hold index_stream or index_group structures
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexTree {
     /// Root node
     pub root: Option<Arc<Mutex<IndexNode>>>,
@@ -27,7 +27,7 @@ pub struct IndexTree {
 }
 
 /// 每个 index_stream 都是 Streams 树中的一个节点。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexStream {
     /// 作为树节点
     pub node: IndexTreeNode,
@@ -53,7 +53,7 @@ pub enum IndexNode {
     Group(IndexGroup),
 }
 /// Base structure for index_stream and index_group structures
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexTreeNode {
     /// Uncompressed start offset of this Stream (relative to the
     /// beginning of the file) or Block (relative to the beginning
@@ -76,7 +76,7 @@ pub struct IndexRecord {
 }
 
 /// 记录组是 index_stream.groups 树的一部分
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexGroup {
     /// 作为 AVL 树的一部分
     pub node: IndexTreeNode,
@@ -100,7 +100,7 @@ pub struct IndexGroup {
     pub records: Vec<IndexRecord>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 
 pub struct LzmaIndex {
     /// `IndexStream` 组成的 AVL 树
