@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
 #![allow(clippy::new_without_default)]
 use crate::common::{IndexGroup, IndexStream, IndexTreeNode, LzmaIndex};
 

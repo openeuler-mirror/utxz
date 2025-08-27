@@ -6,6 +6,7 @@
 
 mod base;
 mod bcj;
+mod block;
 mod check;
 mod container;
 mod delta;
@@ -18,6 +19,7 @@ mod vli;
 
 pub use base::*;
 pub use bcj::*;
+pub use block::*;
 pub use check::*;
 pub use container::*;
 pub use delta::*;
