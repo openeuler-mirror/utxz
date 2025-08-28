@@ -29,3 +29,12 @@ pub use lzma12::*;
 pub use stream_flags::*;
 pub use version::*;
 pub use vli::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LzmaAction {
+    Run = 0,
+    SyncFlush = 1,
+    FullFlush = 2,
+    FullBarrier = 4,
+    Finish = 3,
+}
