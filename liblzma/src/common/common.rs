@@ -9,6 +9,7 @@ use crate::api::LzmaCheck;
 use crate::api::LzmaFilter;
 use crate::api::LzmaRet;
 use crate::api::LzmaVli;
+use crate::api::LZMA_VLI_UNKNOWN;
 
 pub const LZMA_ACTION_MAX: usize = LzmaAction::FullBarrier as usize;
 pub const LZMA_BUFFER_SIZE: usize = 4096;
@@ -25,6 +26,18 @@ pub struct LzmaInternal {
     pub avail_in: usize,
     pub supported_actions: [bool; LZMA_ACTION_MAX + 1],
     pub allow_buf_error: bool,
+}
+
+impl LzmaInternal {
+    pub fn new() -> Self {
+        Self {
+            next: None,
+            sequence: Sequence::Run,
+            avail_in: 0,
+            supported_actions: [false; LZMA_ACTION_MAX + 1],
+            allow_buf_error: false,
+        }
+    }
 }
 
 // 追踪编码器的当前操作状态
@@ -142,4 +155,27 @@ pub struct LzmaNextCoder {
     // 指向设置输出限制的函数指针。
     pub set_out_limit:
         Option<fn(coder: &mut CoderType, uncomp_size: &mut u64, out_limit: u64) -> LzmaRet>,
+}
+
+pub fn lzma_next_coder_init() -> LzmaNextCoder {
+    LzmaNextCoder {
+        coder: None,
+        init: None,
+        id: LZMA_VLI_UNKNOWN,
+        code: None,
+        end: None,
+        get_progress: None,
+        get_check: None,
+        memconfig: None,
+        update: None,
+        set_out_limit: None,
+    }
+}
+pub fn lzma_next_end(next: &mut LzmaNextCoder) {
+    if next.init.is_some() {
+        if let Some(end_fn) = next.end {
+            end_fn(next.coder.as_mut().unwrap());
+        }
+        *next = lzma_next_coder_init();
+    }
 }

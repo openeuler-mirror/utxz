@@ -5,6 +5,7 @@
  */
 #![allow(clippy::module_inception)]
 #![allow(clippy::type_complexity)]
+#![allow(clippy::new_without_default)]
 pub mod common;
 pub mod index_tree;
 
