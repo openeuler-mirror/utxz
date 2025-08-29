@@ -3,3 +3,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
+pub mod range_common;
+pub use range_common::*;
