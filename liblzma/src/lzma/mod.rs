@@ -3,3 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
+mod fastpos_table;
+
+pub use fastpos_table::*;
