@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- #![allow(clippy::crate_in_macro_def)]
- #![allow(clippy::ptr_arg)]
+#![allow(clippy::crate_in_macro_def)]
+#![allow(clippy::ptr_arg)]
 pub mod range_common;
 pub use range_common::*;
 pub mod range_decoder;
 pub use range_decoder::*;
+
+pub mod price_table;
+pub use price_table::*;
