@@ -13,3 +13,6 @@ pub use range_decoder::*;
 
 pub mod price_table;
 pub use price_table::*;
+
+pub mod price;
+pub use price::*;
