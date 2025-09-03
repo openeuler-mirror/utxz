@@ -6,6 +6,7 @@
 
 #![allow(clippy::crate_in_macro_def)]
 #![allow(clippy::ptr_arg)]
+#![allow(clippy::new_without_default)]
 pub mod range_common;
 pub use range_common::*;
 pub mod range_decoder;
@@ -16,3 +17,6 @@ pub use price_table::*;
 
 pub mod price;
 pub use price::*;
+
+pub mod range_encoder;
+pub use range_encoder::*;
