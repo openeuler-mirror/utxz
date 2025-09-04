@@ -7,6 +7,7 @@
 use crate::api::LzmaAction;
 use crate::api::LzmaCheck;
 use crate::api::LzmaFilter;
+use crate::api::LzmaOptionsType;
 use crate::api::LzmaRet;
 use crate::api::LzmaVli;
 use crate::api::LZMA_VLI_UNKNOWN;
@@ -157,6 +158,23 @@ pub struct LzmaNextCoder {
         Option<fn(coder: &mut CoderType, uncomp_size: &mut u64, out_limit: u64) -> LzmaRet>,
 }
 
+impl Default for LzmaNextCoder {
+    fn default() -> Self {
+        LzmaNextCoder {
+            coder: None,
+            init: None,
+            id: LZMA_VLI_UNKNOWN,
+            code: None,
+            end: None,
+            get_progress: None,
+            get_check: None,
+            memconfig: None,
+            update: None,
+            set_out_limit: None,
+        }
+    }
+}
+
 pub fn lzma_next_coder_init() -> LzmaNextCoder {
     LzmaNextCoder {
         coder: None,
@@ -178,4 +196,12 @@ pub fn lzma_next_end(next: &mut LzmaNextCoder) {
         }
         *next = lzma_next_coder_init();
     }
+}
+
+pub type LzmaInitFunction = fn(next: &mut LzmaNextCoder, filters: &[LzmaFilterInfo]) -> LzmaRet;
+#[derive(Debug, Clone)]
+pub struct LzmaFilterInfo {
+    pub id: LzmaVli,
+    pub init: Option<LzmaInitFunction>,
+    pub options: Option<LzmaOptionsType>,
 }
