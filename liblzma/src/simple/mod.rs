@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- #![allow(clippy::type_complexity)]
+#![allow(clippy::type_complexity)]
 mod arm;
 pub use arm::*;
 
@@ -13,3 +13,6 @@ pub use simple_coder::*;
 
 mod simple_private;
 pub use simple_private::*;
+
+mod arm64;
+pub use arm64::*;
