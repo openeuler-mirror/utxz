@@ -16,3 +16,6 @@ pub use simple_private::*;
 
 mod arm64;
 pub use arm64::*;
+
+mod armthumb;
+pub use armthumb::*;
