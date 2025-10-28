@@ -19,3 +19,6 @@ pub use arm64::*;
 
 mod armthumb;
 pub use armthumb::*;
+
+mod ia64;
+pub use ia64::*;
