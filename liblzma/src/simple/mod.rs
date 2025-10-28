@@ -22,3 +22,6 @@ pub use armthumb::*;
 
 mod ia64;
 pub use ia64::*;
+
+mod powerpc;
+pub use powerpc::*;
