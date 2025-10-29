@@ -28,3 +28,6 @@ pub use powerpc::*;
 
 mod simple_decoder;
 pub use simple_decoder::*;
+
+mod simple_encoder;
+pub use simple_encoder::*;
