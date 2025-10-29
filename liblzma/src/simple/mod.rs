@@ -25,3 +25,6 @@ pub use ia64::*;
 
 mod powerpc;
 pub use powerpc::*;
+
+mod simple_decoder;
+pub use simple_decoder::*;
