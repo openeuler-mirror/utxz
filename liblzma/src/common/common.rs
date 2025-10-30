@@ -205,3 +205,37 @@ pub struct LzmaFilterInfo {
     pub init: Option<LzmaInitFunction>,
     pub options: Option<LzmaOptionsType>,
 }
+
+
+pub fn lzma_bufcpy(
+    in_0: &[u8],
+    in_pos: &mut usize,
+    in_size: usize,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> usize {
+    let in_avail: usize = in_size - *in_pos;
+    let out_avail: usize = out_size - *out_pos;
+    let copy_size: usize = if in_avail < out_avail {
+        in_avail
+    } else {
+        out_avail
+    };
+
+    let out_pose_t = *out_pos;
+    let in_pose_t = *in_pos;
+
+    // println!("input first 10 bytes: {:?}", &in_0[..in_0.len().min(10)]);
+
+    if copy_size > 0 {
+        out[out_pose_t..out_pose_t + copy_size]
+            .copy_from_slice(&in_0[in_pose_t..in_pose_t + copy_size]);
+    }
+
+    // println!("output first 10 bytes: {:?}", &out[..out.len().min(10)]);
+
+    *in_pos = (*in_pos).wrapping_add(copy_size);
+    *out_pos = (*out_pos).wrapping_add(copy_size);
+    return copy_size;
+}
