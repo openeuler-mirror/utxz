@@ -206,7 +206,6 @@ pub struct LzmaFilterInfo {
     pub options: Option<LzmaOptionsType>,
 }
 
-
 pub fn lzma_bufcpy(
     in_0: &[u8],
     in_pos: &mut usize,
@@ -237,5 +236,5 @@ pub fn lzma_bufcpy(
 
     *in_pos = (*in_pos).wrapping_add(copy_size);
     *out_pos = (*out_pos).wrapping_add(copy_size);
-    return copy_size;
+    copy_size
 }
