@@ -4,23 +4,17 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- 
- use crate::{
-     api::{LzmaAction, LzmaRet},
-     common::{
-         lzma_bufcpy, 
-         LzmaFilterInfo, LzmaNextCoder,
-     },
- };
- 
- use super::{LzmaSimpleCoder,   SimpleType};
+use crate::{
+    api::{LzmaAction, LzmaRet},
+    common::{lzma_bufcpy, LzmaFilterInfo, LzmaNextCoder},
+};
 
-
+use super::{LzmaSimpleCoder, SimpleType};
 
 /// 复制或编码/解码更多数据到out[]
+#[allow(clippy::too_many_arguments)]
 fn copy_or_code(
     coder: &mut LzmaSimpleCoder,
-
     input: &Vec<u8>,
     in_pos: &mut usize,
     in_size: usize,
@@ -58,7 +52,7 @@ fn copy_or_code(
                 output,
                 out_pos,
                 out_size,
-                action.clone(),
+                action,
             ),
             None => LzmaRet::Ok,
         };
@@ -75,7 +69,6 @@ fn copy_or_code(
 
     LzmaRet::Ok
 }
-
 
 type FilterFn = fn(&mut SimpleType, u32, bool, &mut [u8], usize) -> usize;
 /// 初始化简单编码器
