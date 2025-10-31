@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::api::LzmaAction;
-use crate::api::LzmaCheck;
-use crate::api::LzmaFilter;
-use crate::api::LzmaOptionsType;
-use crate::api::LzmaRet;
-use crate::api::LzmaVli;
-use crate::api::LZMA_VLI_UNKNOWN;
+use crate::{
+    api::{LzmaAction, LzmaCheck, LzmaFilter, LzmaOptionsType, LzmaRet, LzmaVli, LZMA_VLI_UNKNOWN},
+    simple::LzmaSimpleCoder,
+};
 
 pub const LZMA_ACTION_MAX: usize = LzmaAction::FullBarrier as usize;
 pub const LZMA_BUFFER_SIZE: usize = 4096;
@@ -71,7 +68,7 @@ pub enum CoderType {
     // DeltaCoder(LzmaDeltaCoder),
     // LzDecoder(LzmaDecoder),
     // LzEncoder(LzmaEncoder),
-    // SimpleCoder(LzmaSimpleCoder),
+    SimpleCoder(LzmaSimpleCoder),
     // StreamEncoderMt(LzmaStreamEncoderMt<'a>),
 }
 
