@@ -147,14 +147,7 @@ fn simple_code(
 
         // 复制/编码/解码更多数据到out[]
         let ret = copy_or_code(
-            coder,
-            input,
-            in_pos,
-            in_size,
-            output,
-            out_pos,
-            out_size,
-            action,
+            coder, input, in_pos, in_size, output, out_pos, out_size, action,
         );
         debug_assert!(ret != LzmaRet::StreamEnd);
         if ret != LzmaRet::Ok {
