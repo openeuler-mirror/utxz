@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::{
-    api::{LzmaAction, LzmaRet},
-    common::{lzma_bufcpy, CoderType, LzmaFilterInfo, LzmaNextCoder},
-};
 use std::cmp::min;
 
-use super::{LzmaSimpleCoder, SimpleType};
+use crate::{
+    api::{LzmaAction, LzmaFilter, LzmaRet},
+    common::{
+        lzma_bufcpy, lzma_next_end, lzma_next_filter_init, lzma_next_filter_update, CoderType,
+        LzmaFilterInfo, LzmaNextCoder,
+    },
+};
+
+use super::{LzmaSimpleCoder, LzmaSimpleX86, SimpleType};
+
 
 /// 复制或编码/解码更多数据到out[]
 #[allow(clippy::too_many_arguments)]
@@ -231,15 +236,89 @@ fn simple_code(
 }
 
 type FilterFn = fn(&mut SimpleType, u32, bool, &mut [u8], usize) -> usize;
-/// 初始化简单编码器
-pub fn lzma_simple_coder_init(
-    _next: &mut LzmaNextCoder,
-    _filters: &[LzmaFilterInfo],
-    _filter: FilterFn,
-    _simple_size: usize,
-    _unfiltered_max: usize,
-    _alignment: u32,
-    _is_encoder: bool,
+/// 结束简单编码器
+fn simple_coder_end(coder_ptr: &mut CoderType) {
+    let coder = match coder_ptr {
+        CoderType::SimpleCoder(ref mut c) => c,
+        _ => return, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+    lzma_next_end(coder.next.as_mut())
+    // Rust的内存管理会自动处理释放
+}
+
+/// 更新简单编码器
+fn simple_coder_update(
+    coder_ptr: &mut CoderType,
+
+    _filters_null: Option<&[LzmaFilter]>,
+    reversed_filters: &[LzmaFilter],
 ) -> LzmaRet {
-    LzmaRet::Ok
+    let coder = match coder_ptr {
+        CoderType::SimpleCoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+    // 没有更新支持，只调用链中的下一个过滤器
+    lzma_next_filter_update(&mut coder.next, &reversed_filters[1..])
+}
+
+/// 初始化简单编码器
+#[allow(unused_assignments)]
+pub fn lzma_simple_coder_init(
+    next: &mut LzmaNextCoder,
+
+    filters: &[LzmaFilterInfo],
+    filter: FilterFn,
+    simple_size: usize,
+    unfiltered_max: usize,
+    alignment: u32,
+    is_encoder: bool,
+) -> LzmaRet {
+    let mut coder: &mut LzmaSimpleCoder = &mut LzmaSimpleCoder::new(0);
+    // 使用Rust的Option来处理可能为空的编码器
+    if next.coder.is_none() {
+        // 创建新的编码器
+        let mut coder_ = LzmaSimpleCoder::new(unfiltered_max * 2);
+        coder_.filter = Some(filter);
+        coder_.allocated = 2 * unfiltered_max;
+        if simple_size > 0 {
+            coder_.simple = SimpleType::X86Filter(LzmaSimpleX86::default());
+        }
+        // coder = &mut coder_;
+        next.code = Some(simple_code);
+        next.end = Some(simple_coder_end);
+        next.update = Some(simple_coder_update);
+        next.coder = Some(CoderType::SimpleCoder(coder_));
+
+        if let Some(CoderType::SimpleCoder(ref mut c)) = next.coder {
+            coder = c;
+        } else {
+            return LzmaRet::ProgError;
+        }
+    } else {
+        coder = match next.coder.as_mut() {
+            Some(CoderType::SimpleCoder(ref mut c)) => c,
+            _ => unreachable!(),
+        };
+    }
+
+    // 设置起始偏移
+    if let Some(options) = &filters[0].options {
+        let simple = options.as_bcj().unwrap();
+        coder.now_pos = simple.start_offset;
+        if coder.now_pos & (alignment - 1) != 0 {
+            return LzmaRet::OptionsError;
+        }
+    } else {
+        coder.now_pos = 0;
+    }
+
+    // 重置变量
+    coder.is_encoder = is_encoder;
+    coder.end_was_reached = false;
+    coder.pos = 0;
+    coder.filtered = 0;
+    coder.size = 0;
+
+    // 初始化下一个过滤器
+    lzma_next_filter_init(&mut coder.next, &filters[1..])
 }

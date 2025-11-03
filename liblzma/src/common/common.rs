@@ -78,7 +78,7 @@ pub enum NextCoderInitFunction {
     // AutoDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
     // RawDecoder(fn(&mut LzmaNextCoder, &[LzmaFilter]) -> LzmaRet),
     // IndexDecoder(fn(&mut LzmaNextCoder, Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>, u64) -> LzmaRet),
-    // FilterInfo(fn(&mut LzmaNextCoder, &[LzmaFilterInfo]) -> LzmaRet),
+    FilterInfo(fn(&mut LzmaNextCoder, &[LzmaFilterInfo]) -> LzmaRet),
     // AloneEncoder(fn(&mut LzmaNextCoder, &LzmaOptionsLzma) -> LzmaRet),
     // BlockDecoder(fn(&mut LzmaNextCoder, &mut LzmaBlock) -> LzmaRet),
     // BlockEncoder(fn(&mut LzmaNextCoder, &LzmaBlock) -> LzmaRet),
@@ -234,4 +234,53 @@ pub fn lzma_bufcpy(
     *in_pos = (*in_pos).wrapping_add(copy_size);
     *out_pos = (*out_pos).wrapping_add(copy_size);
     copy_size
+}
+
+#[macro_export]
+macro_rules! lzma_next_coder_init {
+    ($func:expr, $next:expr,  ) => {
+        if $next.init != Some($func) {
+            lzma_next_end($next);
+        }
+        $next.init = Some($func);
+    };
+}
+pub fn lzma_next_filter_init(next: &mut LzmaNextCoder, filters: &[LzmaFilterInfo]) -> LzmaRet {
+    if let Some(init_fn) = filters[0].init {
+        lzma_next_coder_init!(NextCoderInitFunction::FilterInfo(init_fn), next,);
+        next.id = filters[0].id;
+        init_fn(next, filters)
+    } else {
+        LzmaRet::Ok
+    }
+}
+
+pub fn lzma_next_filter_update(
+    next: &mut LzmaNextCoder,
+
+    reversed_filters: &[LzmaFilter],
+) -> LzmaRet {
+    if reversed_filters[0].id != next.id {
+        return LzmaRet::ProgError;
+    }
+
+    if reversed_filters[0].id == LZMA_VLI_UNKNOWN {
+        return LzmaRet::Ok;
+    }
+
+    assert!(next.update.is_some());
+    let dummy_filter = LzmaFilter {
+        id: 0,
+        options: None,
+    };
+
+    let mut ret = LzmaRet::Ok;
+    if let Some(update) = next.update {
+        ret = update(
+            next.coder.as_mut().unwrap(),
+            Some(&[dummy_filter]),
+            reversed_filters,
+        );
+    };
+    ret
 }
