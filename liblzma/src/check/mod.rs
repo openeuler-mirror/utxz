@@ -5,8 +5,13 @@
  */
 
 #![allow(clippy::needless_range_loop)]
+#![allow(clippy::module_inception)]
+mod check;
 mod crc32_small;
 mod crc64_small;
+mod sha256;
 
+pub use check::*;
 pub use crc32_small::*;
 pub use crc64_small::*;
+pub use sha256::*;
