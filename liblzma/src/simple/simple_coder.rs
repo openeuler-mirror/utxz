@@ -16,7 +16,6 @@ use crate::{
 
 use super::{LzmaSimpleCoder, LzmaSimpleX86, SimpleType};
 
-
 /// 复制或编码/解码更多数据到out[]
 #[allow(clippy::too_many_arguments)]
 fn copy_or_code(
