@@ -3,3 +3,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
+mod delta_private;
+pub use delta_private::*;
