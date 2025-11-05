@@ -94,9 +94,9 @@ pub fn update_literal(mut state: u32) -> u32 {
     if state <= STATE_SHORTREP_LIT_LIT {
         state = STATE_LIT_LIT;
     } else if state <= STATE_LIT_SHORTREP {
-        state = state - 3;
+        state -= 3;
     } else {
-        state = state - 6;
+        state -= 6;
     }
     state
 }

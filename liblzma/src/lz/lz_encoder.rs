@@ -126,7 +126,7 @@ pub enum LzEncoderType {
     Lzma2Encoder(LzmaLzma2Encoder),
     LzmaEncoderPrivate(LzmaLzma1Encoder),
 }
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LzmaLzEncoder {
     pub coder: Option<LzEncoderType>,
     pub code: Option<
@@ -144,17 +144,7 @@ pub struct LzmaLzEncoder {
         Option<fn(coder: &mut LzEncoderType, uncomp_size: &mut u64, out_limit: u64) -> LzmaRet>,
 }
 
-impl Default for LzmaLzEncoder {
-    fn default() -> Self {
-        LzmaLzEncoder {
-            coder: None,          // Option 类型默认是 None
-            code: None,           // Option 类型默认是 None
-            end: None,            // Option 类型默认是 None
-            options_update: None, // Option 类型默认是 None
-            set_out_limit: None,  // Option 类型默认是 None
-        }
-    }
-}
+
 
 #[derive(Debug, Default)]
 pub struct LzmaEncoder {

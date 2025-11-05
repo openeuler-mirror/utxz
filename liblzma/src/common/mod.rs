@@ -6,6 +6,11 @@
 #![allow(clippy::module_inception)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::new_without_default)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::clone_on_copy)]
+#![allow(clippy::enum_variant_names)]
+#![allow(private_interfaces)]
 pub mod alone_decoder;
 pub mod alone_encoder;
 pub mod common;
@@ -23,3 +28,23 @@ pub mod block_decoder;
 pub mod block_encoder;
 pub use block_decoder::*;
 pub use block_encoder::*;
+
+pub mod file_info;
+pub mod filter_common;
+pub mod filter_decoder;
+pub mod filter_encoder;
+pub mod index;
+pub mod index_decoder;
+pub mod index_encoder;
+pub mod index_hash;
+pub use file_info::*;
+pub use filter_common::*;
+pub use filter_decoder::*;
+pub use filter_encoder::*;
+pub use index::*;
+pub use index_decoder::*;
+pub use index_encoder::*;
+pub use index_hash::*;
+
+pub mod vli_size;
+pub use vli_size::*;
