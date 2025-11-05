@@ -4,27 +4,17 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use std::{
-    alloc::alloc,
-    any::{Any, TypeId},
-    sync::{Arc, Mutex},
-};
-
-use crate::common::LzmaIndex;
 use crate::{
     api::{
-        lzma_version_string_c, LzmaAction, LzmaBlock, LzmaCheck, LzmaFilter, LzmaOptionsLzma,
-        LzmaOptionsType, LzmaReservedEnum, LzmaRet, LzmaStream, LzmaVli, LZMA_CONCATENATED,
-        LZMA_FAIL_FAST, LZMA_IGNORE_CHECK, LZMA_TELL_ANY_CHECK, LZMA_TELL_NO_CHECK,
-        LZMA_TELL_UNSUPPORTED_CHECK, LZMA_VERSION, LZMA_VERSION_COMMIT, LZMA_VERSION_MAJOR,
-        LZMA_VERSION_MINOR, LZMA_VERSION_PATCH, LZMA_VERSION_STABILITY_STRING, LZMA_VLI_UNKNOWN,
+         LzmaAction,  LzmaCheck, LzmaFilter,
+        LzmaOptionsType,  LzmaRet, LzmaVli,  LZMA_VLI_UNKNOWN,
     },
-    delta::LzmaDeltaCoder,
-    lz::{LzmaDecoder, LzmaEncoder},
-    lzma::LzmaLzma2Decoder,
+    // delta::LzmaDeltaCoder,
+    // lz::{LzmaDecoder, LzmaEncoder},
+    // lzma::LzmaLzma2Decoder,
     simple::LzmaSimpleCoder,
 };
-use common::{memzero, my_max};
+// use common::{memzero, my_max};
 
 // use super::{
 //     LzmaAloneDecoder, LzmaAloneEncoder, LzmaAutoCoder, LzmaBlockDecoder, LzmaBlockEncoder,

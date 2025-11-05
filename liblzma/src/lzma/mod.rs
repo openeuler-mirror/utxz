@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_range_loop)]
 mod fastpos_table;
 mod lzma2_decoder;
 mod lzma_common;

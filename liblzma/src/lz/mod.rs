@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(clippy::type_complexity)]
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::extra_unused_lifetimes)]
+#![allow(clippy::type_complexity)]
 mod lz_decoder;
 mod lz_encoder;
 mod lz_encoder_mf;

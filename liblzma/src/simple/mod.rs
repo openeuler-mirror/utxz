@@ -5,6 +5,7 @@
  */
 
 #![allow(clippy::type_complexity)]
+#![allow(unreachable_patterns)]
 mod arm;
 pub use arm::*;
 
