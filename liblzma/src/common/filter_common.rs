@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 use crate::api::{LzmaOptionsType, LzmaVli};
 
 use super::{lzma_next_filter_init, LzmaInitFunction};

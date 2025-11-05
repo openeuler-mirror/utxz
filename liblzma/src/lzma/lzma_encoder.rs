@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 use crate::{api::LzmaOptionsLzma, lzma::LzmaLzma1Encoder};
 
 // use super::{get_dist_slot, lzma_lzma_encoder_memusage};
