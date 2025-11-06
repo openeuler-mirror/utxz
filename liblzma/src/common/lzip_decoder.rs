@@ -3,16 +3,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-use crate::{
-    api::{
-         LzmaOptionsLzma,
-    },
+use crate::api::LzmaOptionsLzma;
 
-};
-
-use super::{
-    LzmaNextCoder,
-};
+use super::LzmaNextCoder;
 
 /// .lz 格式版本 0 缺少尾部中的 64 位成员大小字段
 const LZIP_V0_FOOTER_SIZE: usize = 12;

@@ -3,14 +3,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-use crate::{
-    api::{
-        LzmaVli, 
-    },
+use crate::api::LzmaVli;
 
-};
-
-use super::{ LzmaNextCoder};
+use super::LzmaNextCoder;
 
 /// MicroLZMA 解码器状态
 #[derive(Debug, Default)]

@@ -144,8 +144,6 @@ pub struct LzmaLzEncoder {
         Option<fn(coder: &mut LzEncoderType, uncomp_size: &mut u64, out_limit: u64) -> LzmaRet>,
 }
 
-
-
 #[derive(Debug, Default)]
 pub struct LzmaEncoder {
     pub lz: LzmaLzEncoder,
