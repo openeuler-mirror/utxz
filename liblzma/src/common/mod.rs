@@ -60,3 +60,10 @@ pub use microlzma_decoder::*;
 pub use microlzma_encoder::*;
 pub use stream_decoder::*;
 pub use stream_encoder::*;
+
+pub mod stream_flags_commom;
+pub mod stream_flags_decoder;
+pub mod stream_flags_encoder;
+pub use stream_flags_commom::*;
+pub use stream_flags_decoder::*;
+pub use stream_flags_encoder::*;
