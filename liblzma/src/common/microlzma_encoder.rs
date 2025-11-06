@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use super::{
-    
-    LzmaNextCoder,
-};
+use super::LzmaNextCoder;
 
 /// MicroLZMA 编码器结构体
 #[derive(Debug, Default)]

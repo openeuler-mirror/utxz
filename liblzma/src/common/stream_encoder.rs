@@ -6,17 +6,9 @@
 
 use num_enum::TryFromPrimitive;
 
-use crate::{
-    api::{
-         LzmaBlock,  LzmaFilter, 
-        LZMA_BLOCK_HEADER_SIZE_MAX, LZMA_FILTERS_MAX, 
-    },
+use crate::api::{LzmaBlock, LzmaFilter, LZMA_BLOCK_HEADER_SIZE_MAX, LZMA_FILTERS_MAX};
 
-};
-
-use super::{
-    LzmaIndex, LzmaNextCoder,
-};
+use super::{LzmaIndex, LzmaNextCoder};
 
 #[repr(C)]
 #[derive(Debug)]

@@ -3,17 +3,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-use crate::{
-    api::{
-         LzmaBlock, LzmaStreamFlags,
-        LZMA_BLOCK_HEADER_SIZE_MAX, 
-    },
-    
-};
-use super::{
-     LzmaIndexHash, LzmaNextCoder,
-    
-};
+use super::{LzmaIndexHash, LzmaNextCoder};
+use crate::api::{LzmaBlock, LzmaStreamFlags, LZMA_BLOCK_HEADER_SIZE_MAX};
 
 /// LZMA 流解码器结构体
 #[derive(Debug)]
