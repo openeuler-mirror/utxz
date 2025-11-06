@@ -4,23 +4,33 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+ use std::{
+    alloc::alloc,
+    any::{Any, TypeId},
+    sync::{Arc, Mutex},
+};
+
+use crate::common::LzmaIndex;
 use crate::{
     api::{
-         LzmaAction,  LzmaCheck, LzmaFilter,
-        LzmaOptionsType,  LzmaRet, LzmaVli,  LZMA_VLI_UNKNOWN,
+        lzma_version_string_c, LzmaAction, LzmaBlock, LzmaCheck, LzmaFilter, LzmaOptionsLzma,
+        LzmaOptionsType, LzmaReservedEnum, LzmaRet, LzmaStream, LzmaVli, LZMA_CONCATENATED,
+        LZMA_FAIL_FAST, LZMA_IGNORE_CHECK, LZMA_TELL_ANY_CHECK, LZMA_TELL_NO_CHECK,
+        LZMA_TELL_UNSUPPORTED_CHECK, LZMA_VERSION, LZMA_VERSION_COMMIT, LZMA_VERSION_MAJOR,
+        LZMA_VERSION_MINOR, LZMA_VERSION_PATCH, LZMA_VERSION_STABILITY_STRING, LZMA_VLI_UNKNOWN,
     },
-    // delta::LzmaDeltaCoder,
-    // lz::{LzmaDecoder, LzmaEncoder},
-    // lzma::LzmaLzma2Decoder,
+    delta::LzmaDeltaCoder,
+    lz::{LzmaDecoder, LzmaEncoder},
+    lzma::LzmaLzma2Decoder,
     simple::LzmaSimpleCoder,
 };
-// use common::{memzero, my_max};
+use common::{memzero, my_max};
 
-// use super::{
-//     LzmaAloneDecoder, LzmaAloneEncoder, LzmaAutoCoder, LzmaBlockDecoder, LzmaBlockEncoder,
-//     LzmaFileInfoCoder, LzmaIndexDecoder, LzmaIndexEncoder, LzmaLzipCoder, LzmaMicrolzmaDecoder,
-//     LzmaMicrolzmaEncoder, LzmaStreamDecoder, LzmaStreamEncoder,
-// };
+use super::{
+    LzmaAloneDecoder, LzmaAloneEncoder, LzmaAutoCoder, LzmaBlockDecoder, LzmaBlockEncoder,
+    LzmaFileInfoCoder, LzmaIndexDecoder, LzmaIndexEncoder, LzmaLzipCoder, LzmaMicrolzmaDecoder,
+    LzmaMicrolzmaEncoder, LzmaStreamDecoder, LzmaStreamEncoder,
+};
 
 pub const LZMA_ACTION_MAX: usize = LzmaAction::FullBarrier as usize;
 pub const LZMA_BUFFER_SIZE: usize = 4096;
@@ -65,51 +75,51 @@ pub enum Sequence {
 
 #[derive(Debug)]
 pub enum CoderType {
-    // AloneDecoder(LzmaAloneDecoder),
-    // AloneEncoder(LzmaAloneEncoder),
-    // AutoDecoder(LzmaAutoCoder),
-    // BlockDecoder(LzmaBlockDecoder),
-    // BlockEncoder(LzmaBlockEncoder),
-    // FileInfo(LzmaFileInfoCoder),
-    // IndexDecoder(LzmaIndexDecoder),
-    // IndexEncoder(LzmaIndexEncoder),
-    // LzipDecoder(LzmaLzipCoder),
-    // MicroLzamDecoder(LzmaMicrolzmaDecoder),
-    // MicroLzamEncoder(LzmaMicrolzmaEncoder),
-    // StreamDecoder(LzmaStreamDecoder),
-    // StreamEncoder(LzmaStreamEncoder),
-    // DeltaCoder(LzmaDeltaCoder),
-    // LzDecoder(LzmaDecoder),
-    // LzEncoder(LzmaEncoder),
+    AloneDecoder(LzmaAloneDecoder),
+    AloneEncoder(LzmaAloneEncoder),
+    AutoDecoder(LzmaAutoCoder),
+    BlockDecoder(LzmaBlockDecoder),
+    BlockEncoder(LzmaBlockEncoder),
+    FileInfo(LzmaFileInfoCoder),
+    IndexDecoder(LzmaIndexDecoder),
+    IndexEncoder(LzmaIndexEncoder),
+    LzipDecoder(LzmaLzipCoder),
+    MicroLzamDecoder(LzmaMicrolzmaDecoder),
+    MicroLzamEncoder(LzmaMicrolzmaEncoder),
+    StreamDecoder(LzmaStreamDecoder),
+    StreamEncoder(LzmaStreamEncoder),
+    DeltaCoder(LzmaDeltaCoder),
+    LzDecoder(LzmaDecoder),
+    LzEncoder(LzmaEncoder),
     SimpleCoder(LzmaSimpleCoder),
     // StreamEncoderMt(LzmaStreamEncoderMt<'a>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum NextCoderInitFunction {
-    // AloneDecoder(fn(&mut LzmaNextCoder, u64, bool) -> LzmaRet),
-    // AutoDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
-    // RawDecoder(fn(&mut LzmaNextCoder, &[LzmaFilter]) -> LzmaRet),
-    // IndexDecoder(fn(&mut LzmaNextCoder, Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>, u64) -> LzmaRet),
+    AloneDecoder(fn(&mut LzmaNextCoder, u64, bool) -> LzmaRet),
+    AutoDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
+    RawDecoder(fn(&mut LzmaNextCoder, &[LzmaFilter]) -> LzmaRet),
+    IndexDecoder(fn(&mut LzmaNextCoder, Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>, u64) -> LzmaRet),
     FilterInfo(fn(&mut LzmaNextCoder, &[LzmaFilterInfo]) -> LzmaRet),
-    // AloneEncoder(fn(&mut LzmaNextCoder, &LzmaOptionsLzma) -> LzmaRet),
-    // BlockDecoder(fn(&mut LzmaNextCoder, &mut LzmaBlock) -> LzmaRet),
-    // BlockEncoder(fn(&mut LzmaNextCoder, &LzmaBlock) -> LzmaRet),
-    // FileInfoDecoder(
-    //     fn(
-    //         &mut LzmaNextCoder,
-    //         &mut u64,
-    //         Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>,
-    //         u64,
-    //         u64,
-    //     ) -> LzmaRet,
-    // ),
-    // IndexEncoder(fn(&mut LzmaNextCoder, &Box<LzmaIndex>) -> LzmaRet),
-    // LzipDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
-    // MicroLzamDecoder(fn(&mut LzmaNextCoder, u64, u64, bool, u32) -> LzmaRet),
-    // MicroLzamEncoder(fn(&mut LzmaNextCoder, &LzmaOptionsLzma) -> LzmaRet),
-    // StreamDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
-    // StreamEncoder(fn(&mut LzmaNextCoder, Option<&[LzmaFilter]>, LzmaCheck) -> LzmaRet),
+    AloneEncoder(fn(&mut LzmaNextCoder, &LzmaOptionsLzma) -> LzmaRet),
+    BlockDecoder(fn(&mut LzmaNextCoder, &mut LzmaBlock) -> LzmaRet),
+    BlockEncoder(fn(&mut LzmaNextCoder, &LzmaBlock) -> LzmaRet),
+    FileInfoDecoder(
+        fn(
+            &mut LzmaNextCoder,
+            &mut u64,
+            Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>,
+            u64,
+            u64,
+        ) -> LzmaRet,
+    ),
+    IndexEncoder(fn(&mut LzmaNextCoder, &Box<LzmaIndex>) -> LzmaRet),
+    LzipDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
+    MicroLzamDecoder(fn(&mut LzmaNextCoder, u64, u64, bool, u32) -> LzmaRet),
+    MicroLzamEncoder(fn(&mut LzmaNextCoder, &LzmaOptionsLzma) -> LzmaRet),
+    StreamDecoder(fn(&mut LzmaNextCoder, u64, u32) -> LzmaRet),
+    StreamEncoder(fn(&mut LzmaNextCoder, Option<&[LzmaFilter]>, LzmaCheck) -> LzmaRet),
 }
 
 pub type LzmaCodeFunction = fn(

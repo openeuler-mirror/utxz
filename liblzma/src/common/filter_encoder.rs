@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 #![deny(clippy::absurd_extreme_comparisons)]
 #![deny(clippy::useless_attribute)]
 use crate::api::{LzmaOptionsType, LzmaRet};
