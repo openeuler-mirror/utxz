@@ -8,7 +8,6 @@ use crate::api::{
     LZMA_VLI_UNKNOWN,
 };
 
-
 // 常量定义
 pub const LZMA_STREAM_FLAGS_SIZE: usize = 2;
 
