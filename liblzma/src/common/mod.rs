@@ -67,3 +67,8 @@ pub mod stream_flags_encoder;
 pub use stream_flags_commom::*;
 pub use stream_flags_decoder::*;
 pub use stream_flags_encoder::*;
+
+pub mod vli_decoder;
+pub mod vli_encoder;
+pub use vli_decoder::*;
+pub use vli_encoder::*;
