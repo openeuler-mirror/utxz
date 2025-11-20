@@ -150,3 +150,11 @@ pub struct LzmaEncoder {
     pub mf: LzmaMf,
     pub next: Box<LzmaNextCoder>,
 }
+
+pub fn mf_ptr<'a>(mf: &'a LzmaMf) -> &[u8] {
+    &mf.buffer[mf.read_pos as usize..]
+}
+
+pub fn mf_avail(mf: &LzmaMf) -> u32 {
+    mf.write_pos - mf.read_pos
+}
