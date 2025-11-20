@@ -338,3 +338,203 @@ pub fn decode_buffer(
         }
     }
 }
+
+pub fn lz_decode(
+    coder_ptr: &mut CoderType,
+
+    input: &Vec<u8>,
+    in_pos: &mut usize,
+    in_size: usize,
+    output: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+    action: LzmaAction,
+) -> LzmaRet {
+    let coder = match coder_ptr {
+        CoderType::LzDecoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+
+    if coder.next.code.is_none() {
+        return decode_buffer(coder, input, in_pos, in_size, output, out_pos, out_size);
+    }
+
+    // 我们不是链中的最后一个编码器，需要将输入解码到临时缓冲区
+    while *out_pos < out_size {
+        // 如果临时缓冲区为空，则填充它
+        if !coder.next_finished && coder.temp.pos == coder.temp.size {
+            coder.temp.pos = 0;
+            coder.temp.size = 0;
+
+            let mut ret = LzmaRet::Ok;
+            if let Some(code) = coder.next.code {
+                ret = code(
+                    &mut coder.next.coder.as_mut().unwrap(),
+                    input,
+                    in_pos,
+                    in_size,
+                    &mut coder.temp.buffer.to_vec(),
+                    &mut coder.temp.size,
+                    LZMA_BUFFER_SIZE,
+                    action.clone(),
+                );
+            }
+
+            if ret == LzmaRet::StreamEnd {
+                coder.next_finished = true;
+            } else if ret != LzmaRet::Ok || coder.temp.size == 0 {
+                return ret;
+            }
+        }
+
+        if coder.this_finished {
+            if coder.temp.size != 0 {
+                return LzmaRet::DataError;
+            }
+
+            if coder.next_finished {
+                return LzmaRet::StreamEnd;
+            }
+
+            return LzmaRet::Ok;
+        }
+
+        // 使用临时变量避免重复借用
+        let mut temp_pos = coder.temp.pos;
+        let temp_size = coder.temp.size;
+        let ret = decode_buffer(
+            coder,
+            &mut coder.temp.buffer.to_vec(),
+            &mut temp_pos, // 使用临时变量
+            temp_size,     // 使用临时变量
+            output,
+            out_pos,
+            out_size,
+        );
+
+        if ret == LzmaRet::StreamEnd {
+            coder.this_finished = true;
+        } else if ret != LzmaRet::Ok {
+            return ret;
+        } else if coder.next_finished && *out_pos < out_size {
+            return LzmaRet::DataError;
+        }
+    }
+
+    LzmaRet::Ok
+}
+
+pub fn lz_decoder_end(coder_ptr: &mut CoderType) {
+    let coder = match coder_ptr {
+        CoderType::LzDecoder(ref mut c) => c,
+        _ => return, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+
+    // 结束下一个编码器
+    lzma_next_end(&mut coder.next);
+
+    // 结束当前编码器
+    if let Some(end_fn) = coder.lz.end {
+        end_fn(coder.lz.coder.as_mut().unwrap());
+    }
+}
+
+pub fn lzma_lz_decoder_init(
+    next: &mut LzmaNextCoder,
+    filters: &[LzmaFilterInfo],
+    lz_init: fn(
+        &mut LzmaLzDecoder,
+        LzmaVli,
+        &LzmaOptionsType,
+        &mut LzmaLzDecoderOptions,
+    ) -> LzmaRet,
+) -> LzmaRet {
+    // 如果编码器尚未分配，则进行分配
+    if next.coder.is_none() {
+        // 创建新的解码器实例
+        let coder = LzmaDecoder::default();
+
+        // 设置函数指针
+        next.code = Some(lz_decode);
+        next.end = Some(lz_decoder_end);
+        next.coder = Some(CoderType::LzDecoder(coder));
+    }
+
+    // 获取解码器实例
+    let coder = match next.coder.as_mut().unwrap() {
+        CoderType::LzDecoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError,
+    };
+
+    // 初始化解码器字段
+    coder.dict.buf = Vec::new();
+    coder.dict.size = 0;
+    coder.lz = LzmaLzDecoder::default();
+    coder.next = Box::new(LzmaNextCoder::default());
+
+    // 分配并初始化基于 LZ 的解码器，也会返回字典大小
+    let mut lz_options = LzmaLzDecoderOptions {
+        dict_size: 0,
+        preset_dict: Vec::new(),
+        preset_dict_size: 0,
+    };
+
+    let ret = lz_init(
+        &mut coder.lz,
+        filters[0].id,
+        &filters[0].options.clone().unwrap(),
+        &mut lz_options,
+    );
+    if ret != LzmaRet::Ok {
+        return ret;
+    }
+
+    // 如果字典大小非常小，则增加到 4096 字节
+    if lz_options.dict_size < 4096 {
+        lz_options.dict_size = 4096;
+    }
+
+    // 使字典大小为 16 的倍数
+    if lz_options.dict_size > std::usize::MAX - 15 {
+        return LzmaRet::MemError;
+    }
+
+    lz_options.dict_size = (lz_options.dict_size + 15) & !(15);
+
+    // 分配并初始化字典
+    if coder.dict.size != lz_options.dict_size {
+        coder.dict.buf = vec![0; lz_options.dict_size];
+        if coder.dict.buf.is_empty() {
+            return LzmaRet::MemError;
+        }
+        coder.dict.size = lz_options.dict_size;
+    }
+
+    // 重置解码器
+    lz_decoder_reset(coder);
+
+    // 如果提供了预设字典，则使用它
+    if !lz_options.preset_dict.is_empty() && lz_options.preset_dict_size > 0 {
+        let copy_size = my_min(lz_options.preset_dict_size, lz_options.dict_size);
+        let offset = lz_options.preset_dict_size - copy_size;
+        coder
+            .dict
+            .buf
+            .copy_from_slice(&lz_options.preset_dict[offset..offset + copy_size]);
+        coder.dict.pos = copy_size;
+        coder.dict.full = copy_size;
+    }
+
+    // 其他初始化
+    coder.next_finished = false;
+    coder.this_finished = false;
+    coder.temp.pos = 0;
+    coder.temp.size = 0;
+
+    // 初始化链中的下一个过滤器（如果有的话）
+    lzma_next_filter_init(&mut coder.next, &filters[1..])
+}
+
+pub fn lzma_lz_decoder_memusage(dictionary_size: usize) -> u64 {
+    std::mem::size_of::<LzmaDecoder>() as u64 + dictionary_size as u64
+}
