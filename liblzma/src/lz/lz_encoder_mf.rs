@@ -291,3 +291,767 @@
      }
  }
  
+ /// 根据 HC4 算法查找匹配项
+///
+/// 参数说明：
+/// - `len_limit`：匹配长度上限
+/// - `pos`：当前数据在整个缓冲区中的位置（绝对位置）
+/// - `buf`：整个数据缓冲区（包含当前数据段以及历史数据）
+/// - `cur_index`：当前数据段在 buf 中的起始索引
+/// - `cur_match`：当前匹配候选位置（绝对位置）
+/// - `depth`：查找深度
+/// - `son`：辅助数组，用于存储匹配候选信息，长度应足够
+/// - `cyclic_pos`：当前循环缓冲区位置
+/// - `cyclic_size`：循环缓冲区总大小
+/// - `matches`：存储匹配结果的数组切片，调用者保证容量足够
+/// - `len_best`：当前已找到的最佳匹配长度
+///
+/// 返回值：匹配结果数组中匹配项的数量
+pub fn lzma_mf_hc4_find(mf: &mut LzmaMf, matches: &mut [LzmaMatch]) -> u32 {
+    // 取可用字节数作为匹配长度上限
+    let mut len_limit = mf_avail(mf);
+    if mf.nice_len <= len_limit {
+        len_limit = mf.nice_len;
+    } else if len_limit < 4 {
+        // 当可用字节不足 4 时，更新状态后返回 0
+        move_pending(mf);
+        return 0;
+    }
+    // 获取当前数据段，返回安全切片，不使用 unsafe
+    let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+    let pos: u32 = mf.read_pos + mf.offset;
+    let mut matches_count: u32 = 0;
+
+    // 计算哈希值：temp = lzma_crc32_table[0][cur[0]] XOR cur[1]
+    let table = LZMA_CRC32_TABLE.lock().unwrap();
+    let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+    // 计算哈希相关值
+    let hash_2_value: u32 = temp & ((1 << 10) - 1);
+    let hash_3_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & ((1 << 16) - 1);
+    let hash_value: u32 =
+        (temp ^ ((cur[2] as u32) << 8) ^ (table[0][cur[3] as usize] << 5)) & mf.hash_mask;
+    drop(table); // 提前释放全局表锁
+
+    // 计算 delta2 与 delta3，及当前匹配候选值
+    // 注意：数组索引使用 usize 类型
+    let mut delta2: u32 = pos - mf.hash[hash_2_value as usize];
+    let delta3: u32 = pos - mf.hash[((1 << 10) as usize + hash_3_value as usize)];
+    let cur_match: u32 = mf.hash[((1 << 10) as usize + (1 << 16) as usize + hash_value as usize)];
+    // 更新全局哈希表
+    mf.hash[hash_2_value as usize] = pos;
+    mf.hash[((1 << 10) as usize + hash_3_value as usize)] = pos;
+    mf.hash[((1 << 10) as usize + (1 << 16) as usize + hash_value as usize)] = pos;
+    let mut len_best: u32 = 1;
+
+    // 获取当前数据段在整体缓冲区中的起始索引（安全返回）
+    let cur_index: usize = mf.cur_offset() as usize;
+
+    // 判断前面位置是否有匹配：
+    // 如果 delta2 小于循环缓冲区大小，且当前缓冲区中位于 (cur_index - delta2) 的字节与位于 cur_index 的相同
+    if delta2 < mf.cyclic_size
+        && cur_index >= delta2 as usize
+        && mf.buffer[cur_index - delta2 as usize] == mf.buffer[cur_index]
+    {
+        len_best = 2;
+        if let Some(first_match) = matches.get_mut(0) {
+            first_match.len = 2;
+            first_match.dist = delta2.wrapping_sub(1);
+        }
+        matches_count = 1;
+    }
+    // 如果 delta2 与 delta3 不相等，且 delta3 在循环区内，并且 buf[cur_index - delta3] 与 buf[cur_index]相同，
+    // 则更新最佳匹配长度为 3，并记录匹配结果；同时更新 delta2 为 delta3
+    if delta2 != delta3
+        && delta3 < mf.cyclic_size
+        && cur_index >= delta3 as usize
+        && mf.buffer[cur_index - delta3 as usize] == mf.buffer[cur_index]
+    {
+        len_best = 3;
+        if let Some(m) = matches.get_mut(matches_count as usize) {
+            m.dist = delta3.wrapping_sub(1);
+        }
+        matches_count += 1;
+        delta2 = delta3;
+    }
+    // 如果已找到至少一个匹配，则计算匹配长度更新最佳匹配长度
+    if matches_count != 0 {
+        let new_len = lzma_memcmplen(
+            &mf.buffer[(cur_index - delta2 as usize)..],
+            &mf.buffer[cur_index..],
+            len_best,
+            len_limit,
+        );
+        len_best = new_len;
+        if let Some(last_match) = matches.get_mut((matches_count - 1) as usize) {
+            last_match.len = len_best;
+        }
+        // 如果匹配长度达到上限，则更新辅助数组并移动查找器位置后返回匹配数
+        if len_best == len_limit {
+            mf.son[mf.cyclic_pos as usize] = cur_match;
+            move_pos(mf);
+            return matches_count;
+        }
+    }
+    if len_best < 3 {
+        len_best = 3;
+    }
+    // 调用 hc_find_func 查找更多匹配，假定该函数返回在提供的 matches 切片中写入的匹配数量
+    let additional: usize = hc_find_func(
+        len_limit,
+        pos,
+        cur,
+        cur_index,
+        cur_match,
+        mf.depth,
+        &mut mf.son,
+        mf.cyclic_pos,
+        mf.cyclic_size,
+        &mut matches[matches_count as usize..],
+        len_best,
+    );
+    matches_count += additional as u32;
+    move_pos(mf);
+    matches_count
+}
+
+/// 根据 HC4 算法跳过匹配查找过程中的指定数量
+///
+/// 参数说明：
+/// - `mf`: 匹配查找器对象
+/// - `amount`: 需要跳过的匹配数
+pub fn lzma_mf_hc4_skip(mf: &mut LzmaMf, mut amount: u32) {
+    // 循环跳过指定数量
+    while amount != 0 {
+        if mf_avail(mf) < 4 {
+            move_pending(mf);
+            amount -= 1;
+            continue;
+        }
+        // 获取当前数据段切片
+        let cur: &[u8] = mf_ptr(mf);
+        let pos: u32 = mf.read_pos + mf.offset;
+        let table = LZMA_CRC32_TABLE.lock().unwrap();
+        let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+        drop(table);
+        let hash_2_value: u32 = temp & ((1 << 10) - 1);
+        let table = LZMA_CRC32_TABLE.lock().unwrap();
+        let hash_3_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & ((1 << 16) - 1);
+        let hash_value: u32 =
+            (temp ^ ((cur[2] as u32) << 8) ^ (table[0][cur[3] as usize] << 5)) & mf.hash_mask;
+        drop(table);
+        // 获取当前匹配候选值
+        let cur_match: u32 = mf.hash[(1 << 10) as usize + (1 << 16) as usize + hash_value as usize];
+        // 更新全局哈希表
+        mf.hash[hash_2_value as usize] = pos;
+        mf.hash[(1 << 10) as usize + hash_3_value as usize] = pos;
+        mf.hash[(1 << 10) as usize + (1 << 16) as usize + hash_value as usize] = pos;
+        // 更新辅助数组并移动查找器位置
+        mf.son[mf.cyclic_pos as usize] = cur_match;
+        move_pos(mf);
+        amount -= 1;
+    }
+}
+
+/// 根据 BT 算法查找匹配项
+///
+/// 参数说明：
+/// - `len_limit`：匹配长度上限
+/// - `pos`：当前数据在整个缓冲区中的位置（绝对位置）
+/// - `cur`：整个数据缓冲区（包含当前数据段以及历史数据）
+/// - `cur_match`：当前匹配候选位置（绝对位置）
+/// - `depth`：查找深度
+/// - `son`：辅助数组，用于存储匹配候选信息，长度应足够
+/// - `cyclic_pos`：当前循环缓冲区位置
+/// - `cyclic_size`：循环缓冲区总大小
+/// - `matches`：存储匹配结果的数组切片，调用者保证容量足够
+/// - `len_best`：当前已找到的最佳匹配长度
+///
+/// 返回值：匹配结果数组中匹配项的数量
+pub fn bt_find_func(
+    len_limit: u32,
+    pos: u32,
+    mf: &mut LzmaMf,
+    mut cur_match: u32,
+    // mut depth: u32,
+    // son: &mut [u32],
+    // cyclic_pos: u32,
+    // cyclic_size: u32,
+    matches: &mut [LzmaMatch],
+    mut len_best: u32,
+) -> usize {
+    // println!("====== bt_find_func");
+    let mut depth = mf.depth;
+    let son: &mut [u32] = &mut mf.son;
+    let cyclic_pos = mf.cyclic_pos;
+    let cyclic_size = mf.cyclic_size;
+    // 将当前匹配候选值写入辅助数组对应位置：
+    // 原 C 代码：ptr0 = son + (cyclic_pos << 1) + 1; ptr1 = son + (cyclic_pos << 1);
+    // 在此，我们使用下标模拟指针，即设置初始下标值：
+    let mut ptr0: u32 = ((cyclic_pos) * 2 + 1) as u32;
+    let mut ptr1: u32 = (cyclic_pos) * 2;
+
+    let ptr0_value = son[ptr0 as usize];
+    let ptr1_value = son[ptr1 as usize];
+    let mut len0: u32 = 0;
+    let mut len1: u32 = 0;
+    // 设置初始匹配数为 0
+    let mut match_count: usize = 0;
+
+    loop {
+        // 计算当前候选匹配与当前位置的距离
+        let delta = pos - cur_match;
+        // 如果查找深度用尽或 delta 超出循环缓冲区大小，则清零辅助位置并返回已找到的匹配数
+        if depth == 0 || delta >= cyclic_size {
+            son[ptr0 as usize] = 0;
+            son[ptr1 as usize] = 0;
+            return match_count;
+        }
+        depth -= 1;
+
+        // 计算 pair 下标：
+        // pair = son + ((cyclic_pos - delta + (if delta > cyclic_pos { cyclic_size } else { 0 })) << 1)
+        let tmp = if delta > cyclic_pos { cyclic_size } else { 0 };
+        let pair_idx: u32 = (cyclic_pos.wrapping_sub(delta).wrapping_add(tmp)) * 2;
+
+        // 计算 pb 对应在缓冲区中的起始索引：即 pb = cur - delta，
+        // 这里假设 cur 为整个缓冲区且 pos 表示当前数据起始索引，则 pb_index = pos - delta
+        if pos < delta {
+            return match_count;
+        }
+
+        // let pb_index = (pos - delta) as usize;
+        // if pb_index >= cur.len() || (pos as usize) >= cur.len() {
+        //     // 若超出缓冲区范围则退出
+        //     return match_count;
+        // }
+        let pb = &mf.buffer[(mf.read_pos - delta) as usize..];
+        let cur_ptr = &mf.buffer[mf.read_pos as usize..];
+
+        // 取 len = min(len0, len1)
+        let mut len = if len0 < len1 { len0 } else { len1 };
+
+        // 如果 pb[len] 与 cur_ptr[len]相等，则计算匹配长度
+        if pb.len() > (len as usize)
+            && cur_ptr.len() > (len as usize)
+            && pb[len as usize] == cur_ptr[len as usize]
+        {
+            len = lzma_memcmplen(pb, cur_ptr, len + 1, len_limit);
+            if len_best < len {
+                len_best = len;
+                if let Some(m) = matches.get_mut(match_count) {
+                    m.len = len;
+                    m.dist = delta.wrapping_sub(1);
+                }
+                match_count += 1;
+                if len == len_limit {
+                    // 如果匹配长度达到上限，则按 C 代码逻辑更新辅助数组并返回
+                    son[ptr1 as usize] = son[pair_idx as usize];
+                    son[ptr0 as usize] = son[pair_idx as usize + 1];
+                    return match_count;
+                }
+            }
+        }
+        // 根据比较 pb[len] 与 cur_ptr[len] 的结果更新指针和匹配长度记录
+        if pb.len() > (len as usize)
+            && cur_ptr.len() > (len as usize)
+            && pb[len as usize] < cur_ptr[len as usize]
+        {
+            // 更新 ptr1 下标对应的辅助数组元素为当前候选匹配
+            son[ptr1 as usize] = cur_match;
+
+            // 并将 ptr1 指向 pair + 1
+            ptr1 = pair_idx + 1;
+            // 更新当前匹配候选为 son中新的值
+            cur_match = son[ptr1 as usize];
+            len1 = len;
+        } else {
+            son[ptr0 as usize] = cur_match;
+            ptr0 = pair_idx;
+            cur_match = son[ptr0 as usize];
+
+            len0 = len;
+        }
+    }
+}
+
+/// 根据 BT 算法跳过匹配查找过程中的指定数量
+///
+/// 参数说明：
+/// - `len_limit`：匹配长度上限
+/// - `pos`：当前数据在整个缓冲区中的位置（绝对位置）
+/// - `cur`：整个数据缓冲区（包含当前数据段以及历史数据）
+/// - `cur_match`：当前匹配候选位置（绝对位置）
+/// - `depth`：查找深度
+/// - `son`：辅助数组，用于存储匹配候选信息，长度应足够
+/// - `cyclic_pos`：当前循环缓冲区位置
+/// - `cyclic_size`：循环缓冲区总大小
+pub fn bt_skip_func(
+    len_limit: u32,
+    pos: u32,
+    mf: &mut LzmaMf,
+    mut cur_match: u32,
+    // mut depth: u32,
+    // son: &mut [u32],
+    // cyclic_pos: u32,
+    // cyclic_size: u32,
+) {
+    let mut depth = mf.depth;
+    let son: &mut [u32] = &mut mf.son;
+    let cyclic_pos = mf.cyclic_pos;
+    let cyclic_size = mf.cyclic_size;
+
+    // 初始化辅助数组指针下标，模拟 C 代码中的指针运算
+    let mut ptr0 = (cyclic_pos as usize) * 2 + 1;
+    let mut ptr1 = (cyclic_pos as usize) * 2;
+    let mut len0: u32 = 0;
+    let mut len1: u32 = 0;
+    loop {
+        // 计算偏移量：当前位置与当前匹配候选位置之差
+        let delta = pos - cur_match;
+        if depth == 0 || delta >= cyclic_size {
+            son[ptr0] = 0;
+            son[ptr1] = 0;
+            return;
+        }
+        depth -= 1;
+
+        let tmp = if delta > cyclic_pos { cyclic_size } else { 0 };
+        let pair_idx = ((cyclic_pos.wrapping_sub(delta).wrapping_add(tmp)) as usize) * 2;
+        if pos < delta {
+            return;
+        }
+
+        let pb = &mf.buffer[(mf.read_pos - delta) as usize..];
+        let cur_ptr = &mf.buffer[mf.read_pos as usize..];
+
+        let mut len = if len0 < len1 { len0 } else { len1 };
+
+        if pb.len() > (len as usize)
+            && cur_ptr.len() > (len as usize)
+            && pb[len as usize] == cur_ptr[len as usize]
+        {
+            len = lzma_memcmplen(pb, cur_ptr, len + 1, len_limit);
+            if len == len_limit {
+                son[ptr1] = son[pair_idx];
+                son[ptr0] = son[pair_idx + 1];
+                return;
+            }
+        }
+        if pb.len() > (len as usize)
+            && cur_ptr.len() > (len as usize)
+            && pb[len as usize] < cur_ptr[len as usize]
+        {
+            son[ptr1] = cur_match;
+            ptr1 = pair_idx + 1;
+            cur_match = son[ptr1];
+            len1 = len;
+        } else {
+            son[ptr0] = cur_match;
+            ptr0 = pair_idx;
+            cur_match = son[ptr0];
+            len0 = len;
+        }
+    }
+}
+/// 计算 16 位小端整数（对应 C 代码中的 read16ne）
+fn read16ne(cur: &[u8]) -> u32 {
+    // 若 buf 长度不足2，则返回 0；否则按小端顺序解析
+    if cur.len() < 2 {
+        0
+    } else {
+        u16::from_le_bytes([cur[0], cur[1]]) as u32
+    }
+}
+/// 根据 BT 算法查找匹配项，并返回匹配项数目
+pub fn lzma_mf_bt2_find(mf: &mut LzmaMf, matches: &mut [LzmaMatch]) -> u32 {
+    // 获取可用字节数作为匹配长度的上限
+    let mut len_limit = mf_avail(mf);
+    if mf.nice_len <= len_limit {
+        len_limit = mf.nice_len;
+    } else if len_limit < 2 || (mf.action == LzmaAction::SyncFlush) {
+        // 当可用字节不足2或者处于同步刷新状态时，更新状态后返回 0
+        move_pending(mf);
+        return 0;
+    }
+    let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+    let pos: u32 = mf.read_pos + mf.offset;
+    let mut matches_count: u32 = 0;
+
+    // 计算哈希值：temp = LZMA_CRC32_TABLE.lock()[0][cur[0]] XOR cur[1]
+    let table = LZMA_CRC32_TABLE.lock().unwrap();
+    let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+    drop(table);
+    let hash_value = read16ne(cur);
+    let cur_match = mf.hash[hash_value as usize];
+    mf.hash[hash_value as usize] = pos;
+
+    // 调用 bt_find_func 查找匹配项
+    let found: usize = bt_find_func(
+        len_limit,
+        pos,
+        mf,
+        cur_match,
+        &mut matches[matches_count as usize..],
+        1, // 初始最佳匹配长度为 1
+    );
+    matches_count = found as u32;
+    move_pos(mf);
+    matches_count
+}
+
+/// 根据 BT 算法跳过匹配查找过程中的指定数量
+pub fn lzma_mf_bt2_skip(mf: &mut LzmaMf, mut amount: u32) {
+    while amount != 0 {
+        let mut len_limit = mf_avail(mf);
+        if mf.nice_len <= len_limit {
+            len_limit = mf.nice_len;
+        } else if len_limit < 2 || (mf.action == LzmaAction::SyncFlush) {
+            move_pending(mf);
+            amount -= 1;
+            continue;
+        }
+        let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+        let pos: u32 = mf.read_pos + mf.offset;
+        let hash_value = read16ne(cur);
+        let cur_match = mf.hash[hash_value as usize];
+        mf.hash[hash_value as usize] = pos;
+
+        bt_skip_func(len_limit, pos, mf, cur_match);
+        move_pos(mf);
+        amount -= 1;
+    }
+}
+
+/// 根据 BT 算法查找匹配项，并返回匹配项数目
+///
+/// 参数说明：
+/// - `len_limit`: 匹配长度上限
+/// - `pos`: 当前数据在整个缓冲区中的绝对位置
+/// - `cur`: 整个数据缓冲区切片（包含当前段和历史数据）
+/// - `cur_match`: 当前匹配候选位置（绝对位置）
+/// - `depth`: 查找深度
+/// - `son`: 辅助数组，用于存储匹配候选信息，长度应足够
+/// - `cyclic_pos`: 当前循环缓冲区位置
+/// - `cyclic_size`: 循环缓冲区总大小
+/// - `matches`: 用于存储匹配结果的数组切片，调用者保证容量足够
+/// - `len_best`: 当前已找到的最佳匹配长度
+///
+/// 返回值：匹配结果数组中已写入的匹配项数量（usize）
+pub fn lzma_mf_bt3_find(mf: &mut LzmaMf, matches: &mut [LzmaMatch]) -> u32 {
+    // 取可用字节数作为匹配长度上限
+    let mut len_limit = mf_avail(mf);
+    if mf.nice_len <= len_limit {
+        len_limit = mf.nice_len;
+    } else if len_limit < 3 || (mf.action == LzmaAction::SyncFlush) {
+        // 当可用字节不足 3 或处于同步刷新状态时，更新状态后返回 0
+        move_pending(mf);
+        return 0;
+    }
+    // 获取当前数据缓冲区切片，保证安全，不使用 unsafe
+    let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+    let pos: u32 = mf.read_pos + mf.offset;
+    let mut matches_count: u32 = 0;
+
+    // 计算哈希值：temp = LZMA_CRC32_TABLE.lock()[0][cur[0]] XOR cur[1]
+    let table = LZMA_CRC32_TABLE.lock().unwrap();
+    let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+    drop(table);
+    // 计算哈希相关值
+    let hash_2_value: u32 = temp & (((1u32) << 10) - 1);
+    // 此处采用 read16ne 计算hash_value，等同于： (temp ^ (cur[2]<<8)) & mf.hash_mask
+    let hash_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & mf.hash_mask;
+    // 计算 delta2：当前 pos 与 hash 中保存的值差值
+    let delta2: u32 = pos - mf.hash[hash_2_value as usize];
+    // 取当前候选匹配：存于 hash 中偏移 (1<<10) + hash_value
+    let cur_match: u32 = mf.hash[((1u32 << 10) as usize) + hash_value as usize];
+    // 更新全局 hash 数组
+    mf.hash[hash_2_value as usize] = pos;
+    mf.hash[((1u32 << 10) as usize) + hash_value as usize] = pos;
+    let mut len_best: u32 = 2;
+    // 取当前数据在整体缓冲区中的起始索引（必须保证存在，否则取 0）
+    let cur_index: usize = mf.cur_offset() as usize;
+
+    // 判断：如果 delta2 小于循环缓冲区大小，且前一个字节与当前数据第一个字节相同
+    // 对应 C 代码：if (delta2 < mf->cyclic_size && *(cur - delta2) == *cur)
+    if delta2 < mf.cyclic_size
+        && cur_index >= (delta2 as usize)
+        && cur[cur_index - delta2 as usize] == cur[cur_index]
+    {
+        // 调用 lzma_memcmplen 计算匹配长度（传入切片：当前数据切片和前移 delta2 后的数据切片）
+        len_best = lzma_memcmplen(
+            &cur[cur_index..],
+            &cur[cur_index - delta2 as usize..],
+            len_best,
+            len_limit,
+        );
+        if let Some(first_match) = matches.get_mut(0) {
+            first_match.len = len_best;
+            first_match.dist = delta2.wrapping_sub(1);
+        }
+        matches_count = 1;
+        if len_best == len_limit {
+            // 如果匹配长度达到上限，则调用 bt_skip_func 更新匹配器状态后返回
+            bt_skip_func(len_limit, pos, mf, cur_match);
+            move_pos(mf);
+            return 1;
+        }
+    }
+    // 调用 bt_find_func 查找更多匹配项，返回写入 matches 切片的匹配项数
+    let found = bt_find_func(
+        len_limit,
+        pos,
+        mf,
+        cur_match,
+        &mut matches[matches_count as usize..],
+        len_best,
+    );
+    // 计算总匹配个数（found 为 usize，与 matches_count 相加转换为 u32）
+    matches_count += found as u32;
+    move_pos(mf);
+    matches_count
+}
+
+/// 根据 BT 算法跳过匹配查找过程中的指定数量
+///
+/// 参数说明：
+/// - `mf`: 匹配查找器对象
+/// - `amount`: 需要跳过的匹配数量
+pub fn lzma_mf_bt3_skip(mf: &mut LzmaMf, mut amount: u32) {
+    // 循环跳过指定数量
+    while amount != 0 {
+        let mut len_limit = mf_avail(mf);
+        if mf.nice_len <= len_limit {
+            len_limit = mf.nice_len;
+        } else if len_limit < 3 || (mf.action == LzmaAction::SyncFlush) {
+            move_pending(mf);
+            // 跳过当前数据后减少 amount，继续下一次循环
+            amount -= 1;
+            continue;
+        }
+        let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+        let pos: u32 = mf.read_pos + mf.offset;
+        let table = LZMA_CRC32_TABLE.lock().unwrap();
+        let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+        drop(table);
+        let hash_2_value: u32 = temp & (((1u32) << 10) - 1);
+        let hash_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & mf.hash_mask;
+        let cur_match: u32 = mf.hash[((1u32 << 10) as usize) + hash_value as usize];
+        // 更新全局 hash 数组
+        mf.hash[hash_2_value as usize] = pos;
+        mf.hash[((1u32 << 10) as usize) + hash_value as usize] = pos;
+
+        // 调用 bt_skip_func 更新匹配查找状态
+        bt_skip_func(len_limit, pos, mf, cur_match);
+        move_pos(mf);
+        amount -= 1;
+    }
+}
+
+/// 根据 BT 算法查找匹配项，并返回匹配项数目
+///
+/// 参数说明：
+/// - `len_limit`: 匹配长度上限
+/// - `pos`: 当前数据在整个缓冲区中的绝对位置
+/// - `cur`: 整个数据缓冲区切片（包含当前段和历史数据）
+/// - `cur_match`: 当前匹配候选位置（绝对位置）
+/// - `depth`: 查找深度
+/// - `son`: 辅助数组，用于存储匹配候选信息，长度应足够
+/// - `cyclic_pos`: 当前循环缓冲区位置
+/// - `cyclic_size`: 循环缓冲区总大小
+/// - `matches`: 用于存储匹配结果的数组切片，调用者保证容量足够
+/// - `len_best`: 当前已找到的最佳匹配长度
+///
+/// 返回值：匹配结果数组中写入的匹配项数量（u32）
+pub fn lzma_mf_bt4_find(mf: &mut LzmaMf, matches: &mut [LzmaMatch]) -> u32 {
+    // 取可用字节数作为匹配长度上限
+    let mut len_limit = mf_avail(mf);
+    if mf.nice_len <= len_limit {
+        len_limit = mf.nice_len;
+    } else if len_limit < 4 || (mf.action == LzmaAction::SyncFlush) {
+        // 当可用字节不足4或处于同步刷新状态时，更新状态后返回0
+        move_pending(mf);
+        return 0;
+    }
+    // 获取当前数据缓冲区切片，安全返回，无需 unsafe
+    let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+    let pos: u32 = mf.read_pos + mf.offset;
+    let mut matches_count: u32 = 0;
+
+    // 计算哈希值：temp = LZMA_CRC32_TABLE.lock()[0][cur[0]] XOR cur[1]
+    let table = LZMA_CRC32_TABLE.lock().unwrap();
+    let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+    drop(table);
+    // 计算哈希相关值
+    let hash_2_value: u32 = temp & (((1u32) << 10) - 1);
+    let hash_3_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & (((1u32) << 16) - 1);
+    // 计算 hash_value: 等同于 (temp ^ (cur[2]<<8) ^ (lzma_crc32_table[0][cur[3]] << 5)) & mf.hash_mask
+    let table = LZMA_CRC32_TABLE.lock().unwrap();
+    let hash_value: u32 =
+        (temp ^ ((cur[2] as u32) << 8) ^ (table[0][cur[3] as usize] << 5)) & mf.hash_mask;
+    drop(table);
+
+    // 计算 delta2：当前 pos 与 hash 表中对应值之差
+    let mut delta2: u32 = pos - mf.hash[hash_2_value as usize];
+    // 计算 delta3：当前 pos 与 hash[(1<<10) + hash_3_value] 之间的差值
+    let delta3: u32 = pos - mf.hash[(((1u32) << 10) as usize + hash_3_value as usize)];
+    // 取当前候选匹配值：存放在 hash[(1<<10) + (1<<16) + hash_value]
+    let cur_match: u32 =
+        mf.hash[(((1u32) << 10) as usize + ((1u32) << 16) as usize + hash_value as usize)];
+    // 更新 hash 表
+    mf.hash[hash_2_value as usize] = pos;
+    mf.hash[(((1u32) << 10) as usize) + hash_3_value as usize] = pos;
+    mf.hash[(((1u32) << 10) as usize + ((1u32) << 16) as usize + hash_value as usize)] = pos;
+
+    let mut len_best: u32 = 1;
+    // 获取当前数据在整体缓冲区中的起始索引（若不存在则取0）
+    let cur_index: usize = mf.cur_offset() as usize;
+
+    // 判断：如果 delta2 小于循环大小，且前移 delta2 后的字节与当前字节相同
+
+    if delta2 < mf.cyclic_size
+        && cur_index >= (delta2 as usize)
+        && cur[0] == mf.buffer[(mf.cur_offset() - delta2) as usize]
+    {
+        let a = cur[0];
+        let b = mf.buffer[(mf.cur_offset() - delta2) as usize];
+        len_best = 2;
+        if let Some(first_match) = matches.get_mut(0) {
+            first_match.len = 2;
+            first_match.dist = delta2.wrapping_sub(1);
+        }
+        matches_count = 1;
+    }
+    // 判断：如果 delta2 与 delta3 不相等，且 delta3 小于循环大小，且前移 delta3 后的字节与当前字节相同，
+    // 则更新最佳匹配长度为 3，并记录匹配结果，同时更新 delta2 为 delta3
+    if delta2 != delta3
+        && delta3 < mf.cyclic_size
+        && cur_index >= (delta3 as usize)
+        && mf.buffer[(mf.cur_offset() - delta3) as usize] == cur[0]
+    {
+        len_best = 3;
+        if let Some(m) = matches.get_mut(matches_count as usize) {
+            m.dist = delta3.wrapping_sub(1);
+        }
+        matches_count += 1;
+        delta2 = delta3;
+    }
+    // 如果已有匹配项，则计算匹配长度更新最佳匹配长度
+    if matches_count != 0 {
+        // 使用 lzma_memcmplen 计算匹配长度：传入两个切片分别为当前数据段和前移 delta2 后的数据段
+        len_best = lzma_memcmplen(
+            &cur,
+            &mf.buffer[(mf.read_pos - delta2) as usize..],
+            len_best,
+            len_limit,
+        );
+        if let Some(last_match) = matches.get_mut((matches_count - 1) as usize) {
+            last_match.len = len_best;
+        }
+        if len_best == len_limit {
+            // 如果匹配长度达到上限，则调用 bt_skip_func 更新匹配器状态后直接返回匹配数
+            bt_skip_func(len_limit, pos, mf, cur_match);
+            move_pos(mf);
+            return matches_count;
+        }
+    }
+    if len_best < 3 {
+        len_best = 3;
+    }
+    // 调用 bt_find_func 查找更多匹配项，返回写入匹配结果数组的起始匹配项数量
+    let found = bt_find_func(
+        len_limit,
+        pos,
+        mf,
+        cur_match,
+        &mut matches[matches_count as usize..],
+        len_best,
+    );
+    matches_count += found as u32; // 匹配的位置
+    move_pos(mf);
+    matches_count
+}
+
+/// 根据 BT 算法跳过匹配查找过程中的指定数量
+///
+/// 参数说明：
+/// - `mf`: 匹配查找器对象
+/// - `amount`: 需要跳过的匹配项数量
+pub fn lzma_mf_bt4_skip(mf: &mut LzmaMf, mut amount: u32) {
+    while amount != 0 {
+        let mut len_limit = mf_avail(mf);
+        if mf.nice_len <= len_limit {
+            len_limit = mf.nice_len;
+        } else if len_limit < 4 || (mf.action == LzmaAction::SyncFlush) {
+            move_pending(mf);
+            amount -= 1;
+            continue;
+        }
+        let cur: &[u8] = &mf.buffer[mf.read_pos as usize..];
+        let pos: u32 = mf.read_pos + mf.offset;
+        let table = LZMA_CRC32_TABLE.lock().unwrap();
+        let temp: u32 = table[0][cur[0] as usize] ^ (cur[1] as u32);
+        drop(table);
+        let hash_2_value: u32 = temp & (((1u32) << 10) - 1);
+        let hash_3_value: u32 = (temp ^ ((cur[2] as u32) << 8)) & (((1u32) << 16) - 1);
+        let table = LZMA_CRC32_TABLE.lock().unwrap();
+        let hash_value: u32 =
+            (temp ^ ((cur[2] as u32) << 8) ^ (table[0][cur[3] as usize] << 5)) & mf.hash_mask;
+        drop(table);
+        let cur_match: u32 =
+            mf.hash[((1u32 << 10) as usize) + ((1u32 << 16) as usize) + hash_value as usize];
+        mf.hash[hash_2_value as usize] = pos;
+        mf.hash[((1u32 << 10) as usize) + hash_3_value as usize] = pos;
+        mf.hash[((1u32 << 10) as usize) + ((1u32 << 16) as usize) + hash_value as usize] = pos;
+        // 调用 bt_skip_func 更新匹配查找状态
+        bt_skip_func(len_limit, pos, mf, cur_match);
+        move_pos(mf);
+        amount -= 1;
+    }
+}
+
+// macro_rules! header {
+//     ($is_bt:expr, $len_min:expr, $ret_op:expr) => {
+//         let mut len_limit = mf_avail(mf);
+//         if mf.nice_len <= len_limit {
+//             len_limit = mf.nice_len;
+//         } else if len_limit < $len_min || ($is_bt && mf.action == LzmaAction::SyncFlush) {
+//             assert!(mf.action != LzmaAction::Run);
+//             move_pending(mf);
+//             $ret_op;
+//         }
+//         let cur = mf_ptr(mf);
+//         let pos = mf.read_pos + mf.offset;
+//     };
+// }
+
+// macro_rules! header_find {
+//     ($is_bt:expr, $len_min:expr) => {
+//         header!($is_bt, $len_min, return 0);
+//         let mut matches_count = 0;
+//     };
+// }
+
+// macro_rules! header_skip {
+//     ($is_bt:expr, $len_min:expr) => {
+//         header!($is_bt, $len_min, continue);
+//     };
+// }
+
+// macro_rules! call_find {
+//     ($func:expr, $len_best:expr) => {
+//         matches_count = ($func(
+//             len_limit,
+//             pos,
+//             cur,
+//             cur_match,
+//             mf.depth,
+//             mf.son,
+//             mf.cyclic_pos,
+//             mf.cyclic_size,
+//             &mut matches[matches_count as usize..],
+//             $len_best,
+//         ) - matches) as u32;
+//         move_pos(mf);
+//         return matches_count;
+//     };
+// }
