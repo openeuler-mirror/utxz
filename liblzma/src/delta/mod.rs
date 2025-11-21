@@ -6,3 +6,6 @@
 
 mod delta_private;
 pub use delta_private::*;
+
+mod delta_common;
+pub use delta_common::*;
