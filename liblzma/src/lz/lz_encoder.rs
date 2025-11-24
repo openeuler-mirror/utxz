@@ -506,3 +506,198 @@ fn lz_encoder_prepare(mf: &mut LzmaMf, lz_options: &LzmaLzOptions) -> bool {
 
     false
 }
+
+
+fn lz_encoder_init(mf: &mut LzmaMf, lz_options: &LzmaLzOptions) -> bool {
+    // 分配历史缓冲区
+    if mf.buffer.is_empty() {
+        // 初始化额外字节
+        mf.buffer = vec![0u8; mf.size as usize + LZMA_MEMCMPLEN_EXTRA];
+    }
+
+    // 使用 cyclic_size 作为初始 mf.offset
+    mf.offset = mf.cyclic_size;
+    mf.read_pos = 0;
+    mf.read_ahead = 0;
+    mf.read_limit = 0;
+    mf.write_pos = 0;
+    mf.pending = 0;
+
+    // 分配并初始化哈希表
+    if mf.hash.is_empty() {
+        // 先关闭内存申请
+        mf.hash = vec![0u32; mf.hash_count as usize];
+        mf.son = vec![0u32; mf.sons_count as usize];
+
+        if mf.hash.is_empty() || mf.son.is_empty() {
+            mf.hash.clear();
+            mf.son.clear();
+
+            return true;
+        }
+    } else {
+        mf.hash.fill(0);
+    }
+
+    mf.cyclic_pos = 0;
+
+    // 处理预设字典
+    if let Some(preset_dict) = &lz_options.preset_dict {
+        if lz_options.preset_dict_size > 0 {
+            mf.write_pos = std::cmp::min(lz_options.preset_dict_size, mf.size);
+            mf.buffer[..mf.write_pos as usize].copy_from_slice(
+                &preset_dict[(lz_options.preset_dict_size - mf.write_pos) as usize..],
+            );
+            mf.action = LzmaAction::SyncFlush;
+            mf.skip.unwrap()(mf, mf.write_pos);
+        }
+    }
+
+    mf.action = LzmaAction::Run;
+
+    false
+}
+
+pub fn lzma_lz_encoder_memusage(lz_options: &LzmaLzOptions) -> u64 {
+    let mut mf = LzmaMf {
+        buffer: Vec::new(),
+        hash: Vec::new(),
+        son: Vec::new(),
+        hash_count: 0,
+        sons_count: 0,
+        ..Default::default()
+    };
+
+    if lz_encoder_prepare(&mut mf, lz_options) {
+        return u64::MAX;
+    }
+
+    ((mf.hash_count as u64) + (mf.sons_count as u64)) * std::mem::size_of::<u32>() as u64
+        + mf.size as u64
+        + std::mem::size_of::<LzmaEncoder>() as u64
+}
+
+pub fn lz_encoder_end(coder_ptr: &mut CoderType) {
+    // let coder = coder_ptr;
+    let coder = match coder_ptr {
+        CoderType::LzEncoder(ref mut c) => c,
+        _ => return, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+    // 释放历史缓冲区
+    coder.mf.buffer.clear();
+    coder.mf.hash.clear();
+    coder.mf.son.clear();
+
+    // 结束下一个编码器
+    lzma_next_end(&mut coder.next);
+    if let Some(end_fn) = coder.lz.end {
+        end_fn(&mut coder.lz.coder.as_mut().unwrap());
+    } else {
+        coder.lz.coder = None;
+    }
+}
+
+pub fn lz_encoder_update(
+    coder_ptr: &mut CoderType,
+
+    _filters_null: Option<&[LzmaFilter]>,
+    reversed_filters: &[LzmaFilter],
+) -> LzmaRet {
+    // 将 coder_ptr 转换为具体的 LzmaEncoder 类型
+    // let coder = coder_ptr;
+    let coder = match coder_ptr {
+        CoderType::LzEncoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+
+    if coder.lz.options_update.is_none() {
+        return LzmaRet::ProgError;
+    }
+
+    // 调用 options_update 函数
+    let mut ret: LzmaRet = LzmaRet::Ok;
+    if let Some(options_update) = coder.lz.options_update {
+        ret = options_update(&mut coder.lz.coder.as_mut().unwrap(), &reversed_filters[0]);
+    }
+    if ret != LzmaRet::Ok {
+        return ret;
+    }
+
+    // 更新下一个过滤器
+    lzma_next_filter_update(&mut coder.next, &reversed_filters[1..])
+}
+
+fn lz_encoder_set_out_limit(
+    coder_ptr: &mut CoderType,
+    uncomp_size: &mut u64,
+    out_limit: u64,
+) -> LzmaRet {
+    // let coder = coder_ptr;
+    let coder = match coder_ptr {
+        CoderType::LzEncoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+
+    if coder.next.code.is_none() && coder.lz.set_out_limit.is_some() {
+        if let Some(set_out_limit) = coder.lz.set_out_limit {
+            return set_out_limit(coder.lz.coder.as_mut().unwrap(), uncomp_size, out_limit);
+        }
+    }
+
+    LzmaRet::OptionsError
+}
+
+pub fn lzma_lz_encoder_init(
+    next: &mut LzmaNextCoder,
+    filters: &[LzmaFilterInfo],
+    lz_init: fn(&mut LzmaLzEncoder, LzmaVli, &LzmaOptionsType, &mut LzmaLzOptions) -> LzmaRet,
+) -> LzmaRet {
+    let mut coder: &mut LzmaEncoder = &mut LzmaEncoder::default();
+
+    if next.coder.is_none() {
+        let coder_ = LzmaEncoder::default();
+        // 初始化 next 字段
+        next.coder = Some(CoderType::LzEncoder(coder_));
+        next.code = Some(lz_encode);
+        next.end = Some(lz_encoder_end);
+        next.update = Some(lz_encoder_update);
+        next.set_out_limit = Some(lz_encoder_set_out_limit);
+    }
+
+    coder = match next.coder {
+        Some(CoderType::LzEncoder(ref mut c)) => c,
+        _ => return LzmaRet::ProgError,
+    };
+
+    // 初始化 LZ 编码器
+    let mut lz_options = LzmaLzOptions::default();
+
+    let ret = lz_init(
+        &mut coder.lz,
+        filters[0].id,
+        &mut filters[0].options.clone().unwrap(),
+        &mut lz_options,
+    );
+    if ret != LzmaRet::Ok {
+        return ret;
+    }
+
+    // 设置 coder->mf 的大小信息，并释放旧的缓冲区（如果大小不匹配）
+    if (lz_encoder_prepare(&mut coder.mf, &lz_options)) {
+        return LzmaRet::OptionsError;
+    }
+
+    // 如果需要，分配新的缓冲区，并完成初始化
+    if (lz_encoder_init(&mut coder.mf, &lz_options)) {
+        return LzmaRet::MemError;
+    }
+
+    // 初始化链中的下一个过滤器（如果有的话）
+    lzma_next_filter_init(&mut coder.next, &filters[1..])
+}
+
+pub fn lzma_mf_is_supported(mf: LzmaMatchFinder) -> bool {
+    match mf {
+        _ => false,
+    }
+}
