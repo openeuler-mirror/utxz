@@ -22,3 +22,6 @@ pub use lzma_encoder_private::*;
 
 mod fastpos;
 pub use fastpos::*;
+
+mod lzma_encoder_presets;
+pub use lzma_encoder_presets::*;
