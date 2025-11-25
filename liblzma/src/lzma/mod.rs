@@ -19,3 +19,6 @@ pub use lzma_common::*;
 pub use lzma_decoder::*;
 pub use lzma_encoder::*;
 pub use lzma_encoder_private::*;
+
+mod fastpos;
+pub use fastpos::*;
