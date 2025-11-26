@@ -25,3 +25,12 @@ pub use fastpos::*;
 
 mod lzma_encoder_presets;
 pub use lzma_encoder_presets::*;
+
+mod lzma_encoder_optimum_fast;
+pub use lzma_encoder_optimum_fast::*;
+
+mod lzma_encoder_optimum_normal;
+pub use lzma_encoder_optimum_normal::*;
+
+mod lzma2_encoder;
+pub use lzma2_encoder::*;
