@@ -79,3 +79,13 @@ pub use memcmplen::*;
 
 pub mod block_util;
 pub use block_util::*;
+
+pub mod block_header_decoder;
+pub mod block_header_encoder;
+pub use block_header_decoder::*;
+pub use block_header_encoder::*;
+
+pub mod filter_flags_decoder;
+pub mod filter_flags_encoder;
+pub use filter_flags_decoder::*;
+pub use filter_flags_encoder::*;
