@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 use crate::{
     api::{
         LzmaBlock, LzmaCheck, LzmaRet, LZMA_BLOCK_HEADER_SIZE_MAX, LZMA_BLOCK_HEADER_SIZE_MIN,
