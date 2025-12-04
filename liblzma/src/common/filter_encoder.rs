@@ -425,4 +425,3 @@ pub fn lzma_properties_encode(filter: &LzmaFilter, props: &mut [u8]) -> LzmaRet 
         LzmaRet::Ok
     }
 }
-

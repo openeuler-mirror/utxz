@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
 // sparc.rs
 
 // 假设以下模块、结构体、枚举、函数已在其它文件中定义：
