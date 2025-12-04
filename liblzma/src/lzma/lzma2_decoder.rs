@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::{
+use crate::{
     api::{LzmaOptionsLzma, LzmaOptionsType, LzmaRet, LzmaVli},
     common::{CoderType, LzmaFilterInfo, LzmaNextCoder},
     lz::{
@@ -301,4 +301,3 @@ pub fn lzma_lzma2_props_decode(
     let options = LzmaOptionsType::LzmaOptionsLzma(opt);
     (LzmaRet::Ok, Some(options))
 }
-

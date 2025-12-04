@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::api::{LzmaFilter, LzmaRet, LzmaVli};
+use crate::api::{LzmaFilter, LzmaRet, LzmaVli};
 
 use super::{lzma_properties_decode, lzma_vli_decode, LZMA_FILTER_RESERVED_START};
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use common::read32le;
+use common::read32le;
 
 use crate::{
     api::{LzmaBlock, LzmaRet, LZMA_CHECK_ID_MAX, LZMA_VLI_UNKNOWN},

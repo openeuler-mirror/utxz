@@ -4,28 +4,28 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use common::my_min;
- use libc::memset;
- 
- use crate::{
-     api::{
-         LzmaAction, LzmaFilter, LzmaMatchFinder, LzmaOptionsType, LzmaRet, LzmaVli,
-         LZMA_DICT_SIZE_MIN,
-     },
-     common::{
-         lzma_bufcpy, lzma_next_end, lzma_next_filter_init, lzma_next_filter_update, CoderType,
-         LzmaFilterInfo, LzmaNextCoder, LZMA_MEMCMPLEN_EXTRA,
-     },
-     lz::{
-         lzma_mf_bt2_find, lzma_mf_bt2_skip, lzma_mf_bt3_find, lzma_mf_bt3_skip, lzma_mf_bt4_find,
-         lzma_mf_bt4_skip, lzma_mf_hc3_find, lzma_mf_hc3_skip, lzma_mf_hc4_find, lzma_mf_hc4_skip,
-     },
-     lzma::{LzmaLzma1Encoder, LzmaLzma2Encoder},
- };
- 
- use super::lzma_mf_find;
- 
- pub const MF_FIND: fn(&mut LzmaMf, &mut u32, &mut [LzmaMatch]) -> u32 = lzma_mf_find;
+use common::my_min;
+use libc::memset;
+
+use crate::{
+    api::{
+        LzmaAction, LzmaFilter, LzmaMatchFinder, LzmaOptionsType, LzmaRet, LzmaVli,
+        LZMA_DICT_SIZE_MIN,
+    },
+    common::{
+        lzma_bufcpy, lzma_next_end, lzma_next_filter_init, lzma_next_filter_update, CoderType,
+        LzmaFilterInfo, LzmaNextCoder, LZMA_MEMCMPLEN_EXTRA,
+    },
+    lz::{
+        lzma_mf_bt2_find, lzma_mf_bt2_skip, lzma_mf_bt3_find, lzma_mf_bt3_skip, lzma_mf_bt4_find,
+        lzma_mf_bt4_skip, lzma_mf_hc3_find, lzma_mf_hc3_skip, lzma_mf_hc4_find, lzma_mf_hc4_skip,
+    },
+    lzma::{LzmaLzma1Encoder, LzmaLzma2Encoder},
+};
+
+use super::lzma_mf_find;
+
+pub const MF_FIND: fn(&mut LzmaMf, &mut u32, &mut [LzmaMatch]) -> u32 = lzma_mf_find;
 #[derive(Debug, Clone, Default, Copy)]
 pub struct LzmaMatch {
     pub len: u32,
@@ -506,7 +506,6 @@ fn lz_encoder_prepare(mf: &mut LzmaMf, lz_options: &LzmaLzOptions) -> bool {
 
     false
 }
-
 
 fn lz_encoder_init(mf: &mut LzmaMf, lz_options: &LzmaLzOptions) -> bool {
     // 分配历史缓冲区

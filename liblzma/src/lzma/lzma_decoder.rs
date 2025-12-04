@@ -4,39 +4,39 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use common::read32le;
+use common::read32le;
 
- use crate::{
-     api::{
-         LzmaOptionsLzma, LzmaOptionsType, LzmaRet, LzmaVli, LZMA_FILTER_LZMA1EXT, LZMA_LCLP_MAX,
-         LZMA_LZMA1EXT_ALLOW_EOPM, LZMA_VLI_UNKNOWN,
-     },
-     bit_reset, bittree_reset,
-     common::{LzmaFilterInfo, LzmaNextCoder},
-     lz::{
-         dict_get, dict_put, dict_repeat, lzma_lz_decoder_init, lzma_lz_decoder_memusage,
-         LzCoderType, LzmaDict, LzmaLzDecoder, LzmaLzDecoderOptions,
-     },
-     lzma::{
-         update_match, update_short_rep, ALIGN_BITS, DIST_MODEL_START, DIST_SLOT_BITS,
-         LEN_HIGH_BITS, LEN_LOW_BITS, LEN_MID_BITS, LIT_STATES, MATCH_LEN_MIN, STATE_LIT_LIT,
-         STATE_LIT_MATCH, STATE_MATCH_LIT, STATE_MATCH_LIT_LIT, STATE_NONLIT_MATCH, STATE_REP_LIT,
-         STATE_REP_LIT_LIT, STATE_SHORTREP_LIT, STATE_SHORTREP_LIT_LIT,
-     },
-     rangecoder::{
-         rc_read_init, LzmaRangeDecoder, Probability, RC_BIT_MODEL_TOTAL, RC_BIT_MODEL_TOTAL_BITS,
-         RC_MOVE_BITS, RC_SHIFT_BITS, RC_TOP_VALUE,
-     },
-     rc_direct, rc_is_finished, rc_normalize, rc_reset,
- };
- 
- use crate::{lzma::update_long_rep, rc_bit, rc_if_0, rc_update_0, rc_update_1};
- 
- use super::{
-     is_lclppb_valid, ALIGN_SIZE, DIST_MODEL_END, DIST_SLOTS, DIST_STATES, FULL_DISTANCES,
-     LEN_HIGH_SYMBOLS, LEN_LOW_SYMBOLS, LEN_MID_SYMBOLS, LITERAL_CODERS_MAX, LITERAL_CODER_SIZE,
-     POS_STATES_MAX, STATES,
- };
+use crate::{
+    api::{
+        LzmaOptionsLzma, LzmaOptionsType, LzmaRet, LzmaVli, LZMA_FILTER_LZMA1EXT, LZMA_LCLP_MAX,
+        LZMA_LZMA1EXT_ALLOW_EOPM, LZMA_VLI_UNKNOWN,
+    },
+    bit_reset, bittree_reset,
+    common::{LzmaFilterInfo, LzmaNextCoder},
+    lz::{
+        dict_get, dict_put, dict_repeat, lzma_lz_decoder_init, lzma_lz_decoder_memusage,
+        LzCoderType, LzmaDict, LzmaLzDecoder, LzmaLzDecoderOptions,
+    },
+    lzma::{
+        update_match, update_short_rep, ALIGN_BITS, DIST_MODEL_START, DIST_SLOT_BITS,
+        LEN_HIGH_BITS, LEN_LOW_BITS, LEN_MID_BITS, LIT_STATES, MATCH_LEN_MIN, STATE_LIT_LIT,
+        STATE_LIT_MATCH, STATE_MATCH_LIT, STATE_MATCH_LIT_LIT, STATE_NONLIT_MATCH, STATE_REP_LIT,
+        STATE_REP_LIT_LIT, STATE_SHORTREP_LIT, STATE_SHORTREP_LIT_LIT,
+    },
+    rangecoder::{
+        rc_read_init, LzmaRangeDecoder, Probability, RC_BIT_MODEL_TOTAL, RC_BIT_MODEL_TOTAL_BITS,
+        RC_MOVE_BITS, RC_SHIFT_BITS, RC_TOP_VALUE,
+    },
+    rc_direct, rc_is_finished, rc_normalize, rc_reset,
+};
+
+use crate::{lzma::update_long_rep, rc_bit, rc_if_0, rc_update_0, rc_update_1};
+
+use super::{
+    is_lclppb_valid, ALIGN_SIZE, DIST_MODEL_END, DIST_SLOTS, DIST_STATES, FULL_DISTANCES,
+    LEN_HIGH_SYMBOLS, LEN_LOW_SYMBOLS, LEN_MID_SYMBOLS, LITERAL_CODERS_MAX, LITERAL_CODER_SIZE,
+    POS_STATES_MAX, STATES,
+};
 
 // 定义状态转换表
 static NEXT_STATE: [u32; 12] = [

@@ -73,7 +73,6 @@ pub mod vli_encoder;
 pub use vli_decoder::*;
 pub use vli_encoder::*;
 
-
 pub mod memcmplen;
 pub use memcmplen::*;
 
