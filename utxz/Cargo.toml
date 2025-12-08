@@ -3,4 +3,15 @@ name = "utxz"
 version.workspace = true
 edition.workspace = true
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
 [dependencies]
+common = { path = "../common" }
+liblzma = { path = "../liblzma" }
+libc = "0.2.173"
+atty = "0.2.14"
+lazy_static = "1.4"
+nix = "0.29"
+clap = { version = "4.0", features = ["derive"] }
+signal-hook = "0.3"
+#once_cell = { version = "1.16.0", features = ["sync"] }
