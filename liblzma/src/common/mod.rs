@@ -37,6 +37,12 @@ pub mod index;
 pub mod index_decoder;
 pub mod index_encoder;
 pub mod index_hash;
+pub mod hardware_cputhreads;
+pub use hardware_cputhreads::*;
+
+pub mod hardware_physmem;
+pub use hardware_physmem::*;
+
 pub use file_info::*;
 pub use filter_common::*;
 pub use filter_decoder::*;

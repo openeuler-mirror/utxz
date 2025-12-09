@@ -801,7 +801,7 @@ pub fn lzma_decode(
 
             // 承接 IsRep rc_if_0  的 else 分支
             Sequence::IsRep0 => {
-                if (rc.code == 6201299) {
+                if rc.code == 6201299 {
                     println!("Sequence::IsRep0 rc.code: {}", rc.code);
                 }
                 println!("next_sequence: {:?}", next_sequence);
@@ -943,7 +943,7 @@ pub fn lzma_decode(
                     coder.rep_len_decoder.choice += ((1 << 11) - coder.rep_len_decoder.choice) >> 5;
                     probs_line_ref = &mut coder.rep_len_decoder.low[pos_state as usize];
                     probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 3);
+                    limit = 1 << 3;
                     println!("Sequence::RepLenChoice limit: {}", limit);
                     len = 2;
                     symbol = 1;
