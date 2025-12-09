@@ -11,7 +11,10 @@ pub mod check;
 pub mod delta;
 pub mod lz;
 pub mod lzma;
+
+#[macro_use]
 pub mod rangecoder;
+
 pub mod simple;
 
-// use crate::api::*;
+use crate::api::*;
