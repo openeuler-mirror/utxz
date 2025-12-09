@@ -19,11 +19,25 @@ pub enum OperationMode {
     List,
 }
 
+/// 当前的格式类型
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u32)]
+pub enum FormatType {
+    Auto,
+    Xz,
+    Lzma,
+    Lzip,
+    Raw,
+    // 你可以根据实际需要添加更多格式类型
+}
+
 lazy_static! {
 
     /// 当前操作模式，默认为 MODE_COMPRESS
     pub static ref OPT_MODE: Mutex<OperationMode> = Mutex::new(OperationMode::Compress);
 
+ /// 当前文件格式，默认为 FORMAT_AUTO
+    pub static ref OPT_FORMAT: Mutex<FormatType> = Mutex::new(FormatType::Auto);
 
     /// 自动调整标志，默认为 true
     pub static ref OPT_AUTO_ADJUST: Mutex<bool> = Mutex::new(true);
