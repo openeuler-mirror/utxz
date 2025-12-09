@@ -12,6 +12,7 @@ pub mod tuklib_exit;
 pub mod tuklib_integer;
 pub mod tuklib_mbstr_fw;
 pub mod tuklib_mbstr_width;
+pub mod tuklib_physmem;
 
 pub use common::*;
 pub use mythread::*;
@@ -21,3 +22,4 @@ pub use tuklib_exit::*;
 pub use tuklib_integer::*;
 pub use tuklib_mbstr_fw::*;
 pub use tuklib_mbstr_width::*;
+pub use tuklib_physmem::*;
