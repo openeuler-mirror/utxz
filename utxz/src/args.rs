@@ -16,3 +16,5 @@ lazy_static! {
     pub static ref OPT_ROBOT: Mutex<bool> = Mutex::new(false);
     pub static ref OPT_IGNORE_CHECK: Mutex<bool> = Mutex::new(false);
 }
+
+pub static STDIN_FILENAME: &str = "(stdin)";
