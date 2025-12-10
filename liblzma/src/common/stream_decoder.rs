@@ -3,8 +3,31 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-use super::{LzmaIndexHash, LzmaNextCoder};
-use crate::api::{LzmaBlock, LzmaStreamFlags, LZMA_BLOCK_HEADER_SIZE_MAX};
+
+use std::default;
+
+use common::my_max;
+
+use crate::{
+    api::{
+        LzmaAction, LzmaBlock, LzmaCheck, LzmaFilter, LzmaRet, LzmaStream, LzmaStreamFlags,
+        LZMA_BLOCK_HEADER_SIZE_MAX, LZMA_CONCATENATED, LZMA_FILTERS_MAX, LZMA_IGNORE_CHECK,
+        LZMA_STREAM_HEADER_SIZE, LZMA_TELL_ANY_CHECK, LZMA_TELL_NO_CHECK,
+        LZMA_TELL_UNSUPPORTED_CHECK,
+    },
+    check::lzma_check_is_supported,
+    common::{NextCoderInitFunction, LZMA_SUPPORTED_FLAGS},
+    lzma_block_header_size_decode,
+};
+
+use super::{
+    lzma_block_decoder_init, lzma_block_header_decode, lzma_block_unpadded_size, lzma_bufcpy,
+    lzma_end, lzma_filters_free, lzma_index_hash_append, lzma_index_hash_decode,
+    lzma_index_hash_end, lzma_index_hash_init, lzma_index_hash_size, lzma_next_end,
+    lzma_raw_decoder_memusage, lzma_stream_flags_compare, lzma_stream_footer_decode,
+    lzma_stream_header_decode, lzma_strm_init, CoderType, LzmaIndexHash, LzmaNextCoder,
+    INDEX_INDICATOR, LZMA_MEMUSAGE_BASE,
+};
 
 /// LZMA 流解码器结构体
 #[derive(Debug)]
@@ -101,4 +124,443 @@ pub enum Sequence {
     SeqStreamFooter,
     /// 处理流填充
     SeqStreamPadding,
+}
+
+fn stream_decoder_reset(coder: &mut LzmaStreamDecoder) -> LzmaRet {
+    // 初始化用于验证索引的哈希值
+    let old_index_hash = coder.index_hash.clone();
+    coder.index_hash = Some(lzma_index_hash_init(old_index_hash));
+    // 重置其余变量
+    coder.sequence = Sequence::SeqStreamHeader;
+    coder.pos = 0;
+
+    LzmaRet::Ok
+}
+
+fn stream_decode(
+    coder_ptr: &mut CoderType,
+    input: &Vec<u8>,
+    in_pos: &mut usize,
+    in_size: usize,
+    output: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+    action: LzmaAction,
+) -> LzmaRet {
+    //  println!("input: {:?}", input);
+    //  println!("input length: {}", input.len());
+    //  println!("input first 10 bytes: {:?}", &input[..input.len().min(10)]);
+
+    let coder = match coder_ptr {
+        CoderType::StreamDecoder(ref mut c) => c,
+        _ => return LzmaRet::ProgError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+
+    loop {
+        match coder.sequence {
+            Sequence::SeqStreamHeader => {
+                // 将流头复制到内部缓冲区
+                lzma_bufcpy(
+                    input,
+                    in_pos,
+                    in_size,
+                    &mut coder.buffer,
+                    &mut coder.pos,
+                    LZMA_STREAM_HEADER_SIZE,
+                );
+
+                // 如果还没有获取完整的流头，则返回
+                if coder.pos < LZMA_STREAM_HEADER_SIZE {
+                    return LzmaRet::Ok;
+                }
+
+                coder.pos = 0;
+
+                // 解码流头
+                let ret = lzma_stream_header_decode(&mut coder.stream_flags, &coder.buffer);
+                if ret != LzmaRet::Ok {
+                    return if ret == LzmaRet::FormatError && !coder.first_stream {
+                        LzmaRet::DataError
+                    } else {
+                        ret
+                    };
+                }
+
+                coder.first_stream = false;
+                coder.block_options.check = coder.stream_flags.check.clone();
+                coder.sequence = Sequence::SeqBlockHeader;
+
+                if coder.tell_no_check && coder.stream_flags.check == LzmaCheck::None {
+                    return LzmaRet::NoCheck;
+                }
+
+                if coder.tell_unsupported_check
+                    && !lzma_check_is_supported(coder.stream_flags.check.clone())
+                {
+                    return LzmaRet::UnsupportedCheck;
+                }
+
+                if coder.tell_any_check {
+                    return LzmaRet::GetCheck;
+                }
+                coder.sequence = Sequence::SeqBlockHeader;
+                continue;
+            }
+
+            Sequence::SeqBlockHeader => {
+                if *in_pos >= in_size {
+                    return LzmaRet::Ok;
+                }
+
+                if coder.pos == 0 {
+                    if input[*in_pos] == INDEX_INDICATOR {
+                        coder.sequence = Sequence::SeqIndex;
+                        continue;
+                    }
+
+                    coder.block_options.header_size =
+                        lzma_block_header_size_decode!(input[*in_pos]);
+                }
+
+                lzma_bufcpy(
+                    input,
+                    in_pos,
+                    in_size,
+                    &mut coder.buffer,
+                    &mut coder.pos,
+                    coder.block_options.header_size as usize,
+                );
+
+                if coder.pos < coder.block_options.header_size as usize {
+                    return LzmaRet::Ok;
+                }
+
+                coder.pos = 0;
+                coder.sequence = Sequence::SeqBlockInit;
+                continue;
+            }
+
+            Sequence::SeqBlockInit => {
+                coder.block_options.version = 1;
+                let mut filters: [LzmaFilter; LZMA_FILTERS_MAX + 1] = Default::default();
+                coder.block_options.filters = filters.to_vec();
+
+                let ret = lzma_block_header_decode(&mut coder.block_options, &mut coder.buffer);
+                if ret != LzmaRet::Ok {
+                    return ret;
+                }
+
+                coder.block_options.ignore_check = coder.ignore_check;
+
+                let memusage = lzma_raw_decoder_memusage(&coder.block_options.filters);
+                let mut ret = LzmaRet::Ok;
+                if memusage == u64::MAX {
+                    ret = LzmaRet::OptionsError;
+                } else {
+                    coder.memusage = memusage;
+                    if memusage > coder.memlimit {
+                        ret = LzmaRet::MemlimitError;
+                    } else {
+                        ret = lzma_block_decoder_init(
+                            &mut coder.block_decoder,
+                            &mut coder.block_options,
+                        )
+                    }
+                };
+
+                // 更新 filters 数组以匹配 block_options.filters 的内容
+                // for (i, filter) in coder.block_options.filters.iter().enumerate() {
+                //     if i < LZMA_FILTERS_MAX + 1 {
+                //         filters[i] = filter.clone();
+                //     }
+                // }
+                lzma_filters_free(&mut coder.block_options.filters);
+                coder.block_options.filters = Vec::new();
+
+                if ret != LzmaRet::Ok {
+                    return ret;
+                }
+
+                coder.sequence = Sequence::SeqBlockRun;
+                continue;
+            }
+
+            Sequence::SeqBlockRun => {
+                let mut ret = LzmaRet::Ok;
+                if let Some(code) = coder.block_decoder.code {
+                    ret = code(
+                        coder.block_decoder.coder.as_mut().unwrap(),
+                        input,
+                        in_pos,
+                        in_size,
+                        output,
+                        out_pos,
+                        out_size,
+                        action.clone(),
+                    );
+                    if ret != LzmaRet::StreamEnd {
+                        return ret;
+                    }
+                }
+
+                // 从块解码器中获取实际的大小并更新 block_options
+                if let Some(CoderType::BlockDecoder(block_coder)) =
+                    coder.block_decoder.coder.as_mut()
+                {
+                    if let Some(block) = block_coder.get_block_info() {
+                        coder.block_options = block;
+                    }
+                }
+
+                let block_unpadded_size = lzma_block_unpadded_size(&coder.block_options);
+
+                let ret = lzma_index_hash_append(
+                    coder.index_hash.as_mut().unwrap(),
+                    block_unpadded_size,
+                    coder.block_options.uncompressed_size,
+                );
+
+                if ret != LzmaRet::Ok {
+                    return ret;
+                }
+
+                coder.sequence = Sequence::SeqBlockHeader;
+                continue;
+            }
+
+            Sequence::SeqIndex => {
+                if *in_pos >= in_size {
+                    return LzmaRet::Ok;
+                }
+
+                let ret = lzma_index_hash_decode(
+                    coder.index_hash.as_mut().unwrap(),
+                    input,
+                    in_pos,
+                    in_size,
+                );
+                if ret != LzmaRet::StreamEnd {
+                    return ret;
+                }
+
+                coder.sequence = Sequence::SeqStreamFooter;
+                continue;
+            }
+
+            Sequence::SeqStreamFooter => {
+                lzma_bufcpy(
+                    input,
+                    in_pos,
+                    in_size,
+                    &mut coder.buffer,
+                    &mut coder.pos,
+                    LZMA_STREAM_HEADER_SIZE,
+                );
+
+                if coder.pos < LZMA_STREAM_HEADER_SIZE {
+                    return LzmaRet::Ok;
+                }
+
+                coder.pos = 0;
+
+                let mut footer_flags = LzmaStreamFlags::default();
+                let ret = lzma_stream_footer_decode(&mut footer_flags, &coder.buffer);
+                if ret != LzmaRet::Ok {
+                    return if ret == LzmaRet::FormatError {
+                        LzmaRet::DataError
+                    } else {
+                        ret
+                    };
+                }
+
+                if lzma_index_hash_size(coder.index_hash.as_mut().unwrap())
+                    != footer_flags.backward_size
+                {
+                    return LzmaRet::DataError;
+                }
+
+                let ret = lzma_stream_flags_compare(&coder.stream_flags, &footer_flags);
+                if ret != LzmaRet::Ok {
+                    return ret;
+                }
+
+                if !coder.concatenated {
+                    return LzmaRet::StreamEnd;
+                }
+
+                coder.sequence = Sequence::SeqStreamPadding;
+                continue;
+            }
+
+            Sequence::SeqStreamPadding => {
+                assert!(coder.concatenated);
+
+                loop {
+                    if *in_pos >= in_size {
+                        if action != LzmaAction::Finish {
+                            return LzmaRet::Ok;
+                        }
+
+                        return if coder.pos == 0 {
+                            LzmaRet::StreamEnd
+                        } else {
+                            LzmaRet::DataError
+                        };
+                    }
+
+                    if input[*in_pos] != 0x00 {
+                        break;
+                    }
+
+                    *in_pos += 1;
+                    coder.pos = (coder.pos + 1) & 3;
+                }
+
+                if coder.pos != 0 {
+                    *in_pos += 1;
+                    return LzmaRet::DataError;
+                }
+
+                let ret = stream_decoder_reset(coder);
+                if ret != LzmaRet::Ok {
+                    return ret;
+                }
+                break;
+            }
+
+            _ => {
+                assert!(false);
+                return LzmaRet::ProgError;
+            }
+        }
+    }
+    LzmaRet::Ok
+}
+
+/// 结束流解码器并释放资源
+fn stream_decoder_end(coder_ptr: &mut CoderType) {
+    let coder = match coder_ptr {
+        CoderType::StreamDecoder(ref mut c) => c,
+        _ => return, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+    lzma_next_end(&mut coder.block_decoder);
+    lzma_index_hash_end(&mut coder.index_hash.as_mut().unwrap());
+}
+
+/// 获取流解码器的校验值
+fn stream_decoder_get_check(coder_ptr: &mut CoderType) -> LzmaCheck {
+    let coder = match coder_ptr {
+        CoderType::StreamDecoder(ref mut c) => c,
+        _ => return LzmaCheck::None, //，则返回错误
+    };
+    coder.stream_flags.check.clone()
+}
+
+/// 配置流解码器的内存使用
+fn stream_decoder_memconfig(
+    coder_ptr: &mut CoderType,
+    memusage: &mut u64,
+    old_memlimit: &mut u64,
+    new_memlimit: u64,
+) -> LzmaRet {
+    let coder = match coder_ptr {
+        CoderType::StreamDecoder(ref mut c) => c,
+        _ => return LzmaRet::MemError, // 如果不是 AloneDecoder 类型，则返回错误
+    };
+    *memusage = coder.memusage;
+    *old_memlimit = coder.memlimit;
+
+    if new_memlimit != 0 {
+        if new_memlimit < coder.memusage {
+            return LzmaRet::MemlimitError;
+        }
+        coder.memlimit = new_memlimit;
+    }
+
+    LzmaRet::Ok
+}
+
+pub fn lzma_stream_decoder_init(next: &mut LzmaNextCoder, memlimit: u64, flags: u32) -> LzmaRet {
+    // lzma_next_coder_init!(lzma_stream_decoder_init, next, allocator);
+    if next.init
+        != Some(NextCoderInitFunction::StreamDecoder(
+            lzma_stream_decoder_init,
+        ))
+    {
+        lzma_next_end(next);
+    }
+    next.init = Some(NextCoderInitFunction::StreamDecoder(
+        lzma_stream_decoder_init,
+    ));
+
+    if flags & !LZMA_SUPPORTED_FLAGS != 0 {
+        return LzmaRet::OptionsError;
+    }
+
+    if next.coder.is_none() {
+        let coder = LzmaStreamDecoder::default();
+        next.coder = Some(CoderType::StreamDecoder(coder));
+        next.code = Some(stream_decode);
+        next.end = Some(stream_decoder_end);
+        next.get_check = Some(stream_decoder_get_check);
+        next.memconfig = Some(stream_decoder_memconfig);
+    }
+
+    let coder = match &mut next.coder {
+        Some(CoderType::StreamDecoder(c)) => c,
+        _ => return LzmaRet::ProgError,
+    };
+
+    coder.memlimit = my_max(1, memlimit);
+    coder.memusage = LZMA_MEMUSAGE_BASE;
+    coder.tell_no_check = (flags & LZMA_TELL_NO_CHECK) != 0;
+    coder.tell_unsupported_check = (flags & LZMA_TELL_UNSUPPORTED_CHECK) != 0;
+    coder.tell_any_check = (flags & LZMA_TELL_ANY_CHECK) != 0;
+    coder.ignore_check = (flags & LZMA_IGNORE_CHECK) != 0;
+    coder.concatenated = (flags & LZMA_CONCATENATED) != 0;
+    coder.first_stream = true;
+
+    stream_decoder_reset(coder)
+}
+
+pub fn lzma_stream_decoder(strm: &mut LzmaStream, memlimit: u64, flags: u32) -> LzmaRet {
+    // lzma_next_strm_init(lzma_stream_decoder_init, strm, memlimit, flags);
+    let ret: LzmaRet = lzma_strm_init(Some(strm));
+    if ret != LzmaRet::Ok {
+        return ret;
+    }
+
+    // 避免借用冲突的初始化
+    let init_ret = match strm.internal.try_borrow_mut() {
+        Ok(mut internal_ref) => {
+            if let Some(ref mut internal) = internal_ref.as_mut() {
+                if let Some(ref mut next) = internal.next {
+                    lzma_stream_decoder_init(next, memlimit, flags)
+                } else {
+                    LzmaRet::ProgError
+                }
+            } else {
+                LzmaRet::ProgError
+            }
+        }
+        Err(_) => LzmaRet::ProgError,
+    };
+
+    if init_ret != LzmaRet::Ok {
+        lzma_end(Some(strm));
+        return init_ret;
+    }
+
+    // 设置支持的操作
+    match strm.internal.try_borrow_mut() {
+        Ok(mut internal_ref) => {
+            if let Some(ref mut internal) = internal_ref.as_mut() {
+                internal.supported_actions[LzmaAction::Run as usize] = true;
+                internal.supported_actions[LzmaAction::Finish as usize] = true;
+            }
+        }
+        Err(_) => return LzmaRet::ProgError,
+    }
+
+    LzmaRet::Ok
 }
