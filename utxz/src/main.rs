@@ -16,6 +16,8 @@ mod signals;
 mod suffix;
 mod util;
 
+use file_io::io_init;
+use hardware::hardware_init;
 use lazy_static::lazy_static;
 use signals::{signals_exit, signals_init, USER_ABORT};
 use std::{
