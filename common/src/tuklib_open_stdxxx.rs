@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
- #![warn(clippy::redundant_pattern_matching)]
+#![warn(clippy::redundant_pattern_matching)]
 
 use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
 use nix::sys::stat::Mode;
@@ -28,7 +27,7 @@ pub fn tuklib_open_stdxxx(err_status: i32) {
                 match open("/dev/null", flags, Mode::empty()) {
                     Ok(new_fd) => {
                         // 将 /dev/null 重定向到目标文件描述符
-                        if dup2(new_fd, fd).is_err()  {
+                        if dup2(new_fd, fd).is_err() {
                             // 重定向失败，关闭新打开的文件描述符并退出
                             let _ = close(new_fd);
                             exit(err_status);
