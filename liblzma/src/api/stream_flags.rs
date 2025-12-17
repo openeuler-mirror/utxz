@@ -26,7 +26,7 @@ pub struct LzmaStreamFlags {
     pub reserved_bool8: LzmaBool,
     pub reserved_int1: u32,
     pub reserved_int2: u32,
-    // pub(crate) tmp: LzmaCheck,
+    pub(crate) tmp: LzmaCheck,
 }
 
 pub const LZMA_BACKWARD_SIZE_MIN: u32 = 4;

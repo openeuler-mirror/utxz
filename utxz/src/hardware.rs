@@ -6,7 +6,7 @@
 
 use crate::args::OPT_ROBOT;
 use crate::coder::OperationMode;
-// use crate::message::{message_verbosity_get, MessageVerbosity};
+use crate::message::{message_verbosity_get, MessageVerbosity};
 use crate::util::{round_up_to_mib, uint64_to_str};
 use common::{tuklib_exit, tuklib_mbstr_fw, tuklib_mbstr_width};
 use lazy_static::lazy_static;
@@ -225,12 +225,11 @@ pub fn hardware_memlimit_show() {
         memlimit_show(msgs[4], width_max, hardware_memlimit_mtdec_get());
         memlimit_show(msgs[5], width_max, hw.memlimit_mt_default);
     }
-    // tuklib_exit(
-    //     0,
-    //     1,
-    //     (message_verbosity_get() != MessageVerbosity::Silent) as i32,
-    // )
-    0;
+    tuklib_exit(
+        0,
+        1,
+        (message_verbosity_get() != MessageVerbosity::Silent) as i32,
+    )
 }
 
 const ASSUME_RAM: u64 = 128;

@@ -26,6 +26,7 @@ use crate::{
 use super::lzma_mf_find;
 
 pub const MF_FIND: fn(&mut LzmaMf, &mut u32, &mut [LzmaMatch]) -> u32 = lzma_mf_find;
+
 #[derive(Debug, Clone, Default, Copy)]
 pub struct LzmaMatch {
     pub len: u32,
@@ -152,6 +153,7 @@ pub struct LzmaLzEncoder {
     pub set_out_limit:
         Option<fn(coder: &mut LzEncoderType, uncomp_size: &mut u64, out_limit: u64) -> LzmaRet>,
 }
+
 impl Default for LzmaLzEncoder {
     fn default() -> Self {
         LzmaLzEncoder {

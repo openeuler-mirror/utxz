@@ -1,0 +1,15 @@
+[package]
+name = "utxz-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+xz = { path = "../xz" }
+liblzma = { path = "../liblzma" }
+lazy_static = "1.4"
+libc = "0.2.173"
+atty = "0.2.14"
+nix = "0.23.1"
+clap = { version = "4.0", features = ["derive"] }
+signal-hook = "0.3" 

@@ -3,10 +3,13 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::api::{
     LzmaRet, LzmaStreamFlags, LZMA_BACKWARD_SIZE_MAX, LZMA_BACKWARD_SIZE_MIN, LZMA_CHECK_ID_MAX,
     LZMA_VLI_UNKNOWN,
 };
+use lazy_static::lazy_static;
+use std::sync::Mutex;
 
 // 常量定义
 pub const LZMA_STREAM_FLAGS_SIZE: usize = 2;

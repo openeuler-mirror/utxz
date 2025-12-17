@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+////////////
+// Prices //
+////////////
+
 use common::{my_max, my_min};
 
 use crate::{

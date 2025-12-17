@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#[deny(clippy::not_unsafe_ptr_arg_deref)]
+
 pub fn memzero<T: Default>(slice: &mut [T]) {
     for item in slice.iter_mut() {
         *item = T::default();

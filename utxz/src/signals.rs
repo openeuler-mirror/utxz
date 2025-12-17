@@ -6,22 +6,15 @@
 
 use std::{ptr, sync::Mutex};
 
-use signal_hook::consts::signal::SIGALRM;
-use signal_hook::consts::signal::SIGUSR1;
-
-pub const MESSAGE_PROGRESS_SIGS: &[i32] = &[
-    SIGALRM, SIGUSR1, 0, // 哨兵值，表示数组结束
-];
-
 use common::mythread_sigmask;
 use lazy_static::lazy_static;
 use libc::{raise, sigaction, sigaddset, sigemptyset, sigfillset, sighandler_t, sigset_t};
 use nix::errno::errno;
 
-// use crate::{
-//     // file_io::io_write_to_user_abort_pipe,
-//     // message::{message_signal_handler, MESSAGE_PROGRESS_SIGS},
-// };
+use crate::{
+    file_io::io_write_to_user_abort_pipe,
+    message::{message_signal_handler, MESSAGE_PROGRESS_SIGS},
+};
 
 lazy_static! {
     pub static ref USER_ABORT:Mutex<bool> = Mutex::new(false);
@@ -40,7 +33,7 @@ lazy_static! {
 fn signal_handler(sig: i32) {
     *EXIT_SIGNAL.lock().unwrap() = sig;
     *USER_ABORT.lock().unwrap() = true;
-    // io_write_to_user_abort_pipe();
+    io_write_to_user_abort_pipe();
 }
 
 pub fn signals_init() {
@@ -75,7 +68,7 @@ pub fn signals_init() {
                 continue;
             }
             if sigaction(*i, &my_sa, 0 as *mut sigaction) != 0 {
-                // message_signal_handler();
+                message_signal_handler();
             }
         }
 

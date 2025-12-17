@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use std::string;
+
 pub const LZMA_VERSION_MAJOR: u32 = 5;
 pub const LZMA_VERSION_MINOR: u32 = 4;
 pub const LZMA_VERSION_PATCH: u32 = 4;

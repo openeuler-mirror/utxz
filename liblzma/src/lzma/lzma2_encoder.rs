@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use common::my_max;
 use std::mem;
 
@@ -97,6 +98,7 @@ pub enum Sequence {
     UncompressedHeader,
     UncompressedCopy,
 }
+
 fn lzma2_header_lzma(coder: &mut LzmaLzma2Encoder) {
     assert!(coder.uncompressed_size > 0);
     assert!(coder.uncompressed_size <= LZMA2_UNCOMPRESSED_MAX as usize);

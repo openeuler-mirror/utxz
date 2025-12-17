@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::api::{LzmaRet, LZMA_VLI_BYTES_MAX, LZMA_VLI_MAX};
 
 /// 编码可变长度整数

@@ -7,7 +7,7 @@
 use super::RC_BIT_MODEL_TOTAL;
 
 const RC_MOVE_REDUCING_BITS: u32 = 4;
-// const RC_BIT_PRICE_SHIFT_BITS: u32 = 4;
+const RC_BIT_PRICE_SHIFT_BITS: u32 = 4;
 const RC_PRICE_TABLE_SIZE: usize = (RC_BIT_MODEL_TOTAL >> RC_MOVE_REDUCING_BITS) as usize;
 
 pub const LZMA_RC_PRICES: [u8; RC_PRICE_TABLE_SIZE] = [

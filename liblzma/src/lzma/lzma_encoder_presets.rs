@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::api::{
     LzmaMatchFinder, LzmaMode, LzmaOptionsLzma, LZMA_LC_DEFAULT, LZMA_LP_DEFAULT, LZMA_PB_DEFAULT,
     LZMA_PRESET_EXTREME, LZMA_PRESET_LEVEL_MASK,

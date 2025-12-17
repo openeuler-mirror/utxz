@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use std::rc::Rc;
+
 use super::{LzmaBool, LzmaCheck, LzmaFilter, LzmaReservedEnum, LzmaVli, LZMA_CHECK_SIZE_MAX};
 
 #[derive(Debug, Clone)]

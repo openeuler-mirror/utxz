@@ -86,7 +86,7 @@ pub type LzmaCodeFunction = fn(
     action: LzmaAction,
 ) -> LzmaRet;
 
-// type LzmaEndFunction<T> = fn(coder: Option<T>);
+type LzmaEndFunction<T> = fn(coder: Option<T>);
 
 /// 过滤器保留 ID 的起始值
 pub const LZMA_FILTER_RESERVED_START: u64 = 1 << 62;
@@ -403,7 +403,7 @@ pub fn lzma_next_filter_update(
     }
 
     assert!(next.update.is_some());
-    let dummy_filter = LzmaFilter {
+    let mut dummy_filter = LzmaFilter {
         id: 0,
         options: None,
     };

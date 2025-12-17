@@ -41,7 +41,7 @@ pub fn crc64_init() -> [u64; 256] {
 /// 返回值：最终的 CRC64 校验值
 pub fn lzma_crc64(buf: &[u8], size: usize, crc: u64) -> u64 {
     // 使用 OnceLock 获取全局查找表，如果未初始化则调用 crc64_init 初始化
-    let table = CRC64_TABLE.get_or_init(crc64_init);
+    let table = CRC64_TABLE.get_or_init(|| crc64_init());
 
     // 根据 C 代码先取反初始的 crc 值
     let mut crc = !crc;
