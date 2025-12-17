@@ -5,6 +5,7 @@
  */
 
 use std::cmp::min;
+use std::ptr;
 
 use crate::{
     api::{LzmaAction, LzmaFilter, LzmaRet},
@@ -17,9 +18,9 @@ use crate::{
 use super::{LzmaSimpleCoder, LzmaSimpleX86, SimpleType};
 
 /// 复制或编码/解码更多数据到out[]
-#[allow(clippy::too_many_arguments)]
 fn copy_or_code(
     coder: &mut LzmaSimpleCoder,
+
     input: &Vec<u8>,
     in_pos: &mut usize,
     in_size: usize,
@@ -57,7 +58,7 @@ fn copy_or_code(
                 output,
                 out_pos,
                 out_size,
-                action,
+                action.clone(),
             ),
             None => LzmaRet::Ok,
         };
@@ -89,9 +90,9 @@ fn call_filter(coder: &mut LzmaSimpleCoder, buffer: &mut [u8], size: usize) -> u
 }
 
 /// 简单编码实现
-#[allow(clippy::too_many_arguments)]
 fn simple_code(
     coder_ptr: &mut CoderType,
+
     input: &Vec<u8>,
     in_pos: &mut usize,
     in_size: usize,
@@ -106,7 +107,7 @@ fn simple_code(
     };
 
     // TODO: 添加对LZMA_SYNC_FLUSH的部分支持
-    if action == LzmaAction::SyncFlush {
+    if action.clone() == LzmaAction::SyncFlush {
         return LzmaRet::OptionsError;
     }
 
@@ -151,7 +152,14 @@ fn simple_code(
 
         // 复制/编码/解码更多数据到out[]
         let ret = copy_or_code(
-            coder, input, in_pos, in_size, output, out_pos, out_size, action,
+            coder,
+            input,
+            in_pos,
+            in_size,
+            output,
+            out_pos,
+            out_size,
+            action.clone(),
         );
         debug_assert!(ret != LzmaRet::StreamEnd);
         if ret != LzmaRet::Ok {
@@ -202,7 +210,7 @@ fn simple_code(
             output.as_mut(),
             &mut out_pos_local,
             coder.allocated,
-            action, // 如果 action 已被 move，应重新 clone 或使用引用
+            action.clone(), // 如果 action 已被 move，应重新 clone 或使用引用
         );
         debug_assert!(ret != LzmaRet::StreamEnd);
         if ret != LzmaRet::Ok {
@@ -234,7 +242,6 @@ fn simple_code(
     LzmaRet::Ok
 }
 
-type FilterFn = fn(&mut SimpleType, u32, bool, &mut [u8], usize) -> usize;
 /// 结束简单编码器
 fn simple_coder_end(coder_ptr: &mut CoderType) {
     let coder = match coder_ptr {
@@ -260,8 +267,8 @@ fn simple_coder_update(
     lzma_next_filter_update(&mut coder.next, &reversed_filters[1..])
 }
 
+type FilterFn = fn(&mut SimpleType, u32, bool, &mut [u8], usize) -> usize;
 /// 初始化简单编码器
-#[allow(unused_assignments)]
 pub fn lzma_simple_coder_init(
     next: &mut LzmaNextCoder,
 

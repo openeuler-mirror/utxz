@@ -6,7 +6,7 @@
 
 use lazy_static::lazy_static;
 use std::sync::{Mutex, Once};
-
+/// CRC32 预计算查找表
 lazy_static! {
     pub static ref LZMA_CRC32_TABLE: Mutex<[[u32; 256]; 1]> = Mutex::new([[0; 256]; 1]);
 }
@@ -37,7 +37,7 @@ fn crc32_init() {
 /// 根据提供的C语言代码实现
 pub fn lzma_crc32(buf: &[u8], size: usize, mut crc: u32) -> u32 {
     // 确保 CRC32 查找表已初始化
-    INIT_CRC32.call_once(crc32_init);
+    INIT_CRC32.call_once(|| crc32_init());
 
     crc = !crc;
 

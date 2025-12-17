@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 #![deny(clippy::absurd_extreme_comparisons)]
 #![deny(clippy::useless_attribute)]
 use crate::{

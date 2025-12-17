@@ -1,4 +1,5 @@
 [workspace.package]
+name = "utxz"
 version = "1.0.0"
 edition = "2021"
 
@@ -8,6 +9,9 @@ edition = "2021"
 members = [ 
     "common", 
     "liblzma", 
+    "lzmainfo", 
     "utxz", 
+    "xzdec",
 ]
-resolver = "2"  # 显式指定 resolver 版本
+
+

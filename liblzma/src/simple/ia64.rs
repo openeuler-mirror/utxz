@@ -17,7 +17,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 use crate::{
-    api::LzmaRet,
+    api::{LzmaFilter, LzmaRet},
     common::{LzmaFilterInfo, LzmaNextCoder},
 };
 
@@ -79,7 +79,7 @@ fn ia64_code(
                 let dest = dest >> 4;
 
                 // 更新指令
-                inst_norm &= !((0x8FFFFF_u64) << 13);
+                inst_norm &= !((0x8FFFFF as u64) << 13);
                 inst_norm |= ((dest & 0xFFFFF) as u64) << 13;
                 inst_norm |= ((dest & 0x100000) as u64) << (36 - 20);
 

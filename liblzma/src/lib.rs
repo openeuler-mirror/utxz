@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(unused)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(dead_code)]
+#![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+#[allow(unused_variables)]
+#[allow(non_upper_case_globals)]
 #[macro_use]
 pub mod common;
+
 pub mod api;
 pub mod check;
 pub mod delta;

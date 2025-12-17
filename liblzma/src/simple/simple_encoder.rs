@@ -15,9 +15,10 @@
 //  You can do whatever you want with this file.
 //
 ///////////////////////////////////////////////////////////////////////////////
+use byteorder::{ByteOrder, LittleEndian};
 use common::write32le;
 
-use crate::api::{LzmaOptionsType, LzmaRet};
+use crate::api::{LzmaOptionsBcj, LzmaOptionsType, LzmaRet};
 
 /// 计算简单过滤器属性的大小
 ///
@@ -63,5 +64,5 @@ pub fn lzma_simple_props_encode(options: &LzmaOptionsType, out: &mut [u8]) -> Lz
 
     write32le(&mut out[1..], opt.start_offset);
 
-    LzmaRet::Ok
+    return LzmaRet::Ok;
 }

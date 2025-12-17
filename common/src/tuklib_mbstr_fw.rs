@@ -8,7 +8,7 @@ use crate::tuklib_mbstr_width::tuklib_mbstr_width;
 
 #[no_mangle]
 pub fn tuklib_mbstr_fw(str: &str, columns_min: i32) -> i32 {
-    let len: usize = 0;
+    let mut len: usize = 0;
     // 计算字符串的宽度（在单字节模式下，宽度等于长度）
     let width = tuklib_mbstr_width(str, len);
 

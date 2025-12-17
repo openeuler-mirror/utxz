@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(non_snake_case)]
+use std::convert::TryInto;
+
 use crate::check::LzmaCheckState;
 
 /// 右旋转32位数

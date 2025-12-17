@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::api::{LzmaOptionsLzma, LZMA_LCLP_MAX, LZMA_PB_MAX};
 use crate::rangecoder::bit_reset;
+use crate::{
+    api::{LzmaOptionsLzma, LZMA_LCLP_MAX, LZMA_PB_MAX},
+    rangecoder::Probability,
+};
+use num_enum::TryFromPrimitive;
 use std::sync::{Arc, Mutex};
 
 /// LzmaLzmaState 各状态对应的 const 常量（转换自枚举）
@@ -94,9 +98,9 @@ pub fn update_literal(mut state: u32) -> u32 {
     if state <= STATE_SHORTREP_LIT_LIT {
         state = STATE_LIT_LIT;
     } else if state <= STATE_LIT_SHORTREP {
-        state -= 3;
+        state = state - 3;
     } else {
-        state -= 6;
+        state = state - 6;
     }
     state
 }

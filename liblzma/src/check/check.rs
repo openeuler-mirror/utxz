@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use crate::check::crc32_small::*;
+use crate::check::crc64_small::*;
+use std::fmt;
+
 use crate::{
-    api::{LzmaCheck, LZMA_CHECK_ID_MAX},
+    api::{LzmaBool, LzmaCheck, LZMA_CHECK_ID_MAX},
     check::{lzma_crc32, lzma_crc64, lzma_sha256_finish, lzma_sha256_init, lzma_sha256_update},
 };
 
@@ -42,7 +46,7 @@ use crate::{
 // }
 
 pub fn lzma_check_is_supported(type_: LzmaCheck) -> bool {
-    if type_ as u32 > LZMA_CHECK_ID_MAX {
+    if type_.clone() as u32 > LZMA_CHECK_ID_MAX {
         return false;
     }
 
@@ -66,7 +70,7 @@ pub fn lzma_check_is_supported(type_: LzmaCheck) -> bool {
 }
 
 pub fn lzma_check_size(type_: LzmaCheck) -> u32 {
-    if type_ as u32 > LZMA_CHECK_ID_MAX {
+    if type_.clone() as u32 > LZMA_CHECK_ID_MAX {
         return u32::MAX;
     }
 
@@ -147,13 +151,14 @@ pub fn lzma_check_init(check: &mut LzmaCheckState, type_: LzmaCheck) {
         LzmaCheck::Sha256 => {
             lzma_sha256_init(check);
         }
+        _ => {}
     }
 }
 
 pub fn lzma_check_update(check: &mut LzmaCheckState, type_: LzmaCheck, buf: &[u8], size: usize) {
     match type_ {
         LzmaCheck::Crc32 => {
-            check.state.crc32 = lzma_crc32(buf, size, check.state.crc32);
+            check.state.crc32 = lzma_crc32(buf, size, unsafe { check.state.crc32 });
         }
         LzmaCheck::Crc64 => {
             check.state.crc64 = lzma_crc64(buf, size, check.state.crc64);

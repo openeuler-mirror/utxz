@@ -6,6 +6,11 @@
 
 use crate::api::LzmaRet;
 
+use super::range_common::{
+    RC_BIT_MODEL_TOTAL, RC_BIT_MODEL_TOTAL_BITS, RC_MOVE_BITS, RC_SHIFT_BITS, RC_TOP_VALUE,
+};
+use super::{LzmaRangeEncoder, Probability, RcSymbol};
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct LzmaRangeDecoder {
     pub range: u32,
@@ -23,11 +28,11 @@ pub fn rc_read_init(
         if *in_pos == in_size {
             return LzmaRet::Ok;
         }
-
-        if rc.init_bytes_left == 5 && in_[*in_pos] != 0x00 {
-            return LzmaRet::DataError;
+        unsafe {
+            if rc.init_bytes_left == 5 && in_[*in_pos] != 0x00 {
+                return LzmaRet::DataError;
+            }
         }
-
         rc.code = (rc.code << 8) | in_[*in_pos] as u32;
         *in_pos += 1;
         rc.init_bytes_left = rc.init_bytes_left.wrapping_sub(1);
@@ -88,9 +93,10 @@ macro_rules! rc_normalize {
 
 #[macro_export]
 macro_rules! rc_if_0 {
-    ($rc:expr, $prob:expr, $seq:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr) => {{
+    ($rc:expr, $prob:expr, $seq:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr, $flag:expr) => {{
         if $rc.range < crate::rangecoder::range_common::RC_TOP_VALUE {
             if $in_pos == $in_size {
+                $flag = true;
                 $seq;
                 break;
             }
@@ -141,9 +147,10 @@ macro_rules! rc_bit_last {
 
 #[macro_export]
 macro_rules! rc_bit {
-    ($rc:expr, $prob:expr, $symbol:expr, $action0:expr, $action1:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr,$seq:expr) => {{
+    ($rc:expr, $prob:expr, $symbol:expr, $action0:expr, $action1:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr,$seq:expr, $flag:expr) => {{
         if $rc.range < crate::rangecoder::range_common::RC_TOP_VALUE {
             if $in_pos == $in_size {
+                $flag = true;
                 $seq;
                 break;
             }
@@ -177,9 +184,10 @@ macro_rules! rc_bit_encode {
 
 #[macro_export]
 macro_rules! rc_direct {
-    ($rc:expr, $dest:expr, $seq:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr) => {
+    ($rc:expr, $dest:expr, $seq:expr, $in_pos:expr, $in_size:expr, $input:expr, $rc_bound:expr, $flag:expr) => {
         if $rc.range < crate::rangecoder::range_common::RC_TOP_VALUE {
             if $in_pos == $in_size {
+                $flag = true;
                 $seq;
                 break;
             }

@@ -35,12 +35,8 @@ pub fn bit_reset(prob: Arc<Mutex<u16>>) {
 }
 
 pub fn bittree_reset(probs: &mut [Arc<Mutex<u16>>], bit_levels: usize) {
-    // for bt_i in 0..(1 << bit_levels) {
-    //     bit_reset(Arc::clone(&probs[bt_i]));
-    // }
-
-    for prob in probs.iter().take(1 << bit_levels) {
-        bit_reset(Arc::clone(prob));
+    for bt_i in 0..(1 << bit_levels) {
+        bit_reset(Arc::clone(&probs[bt_i]));
     }
 }
 

@@ -15,7 +15,7 @@ use crate::{
     lzma::{self, LzmaLzma1Decoder, LzmaLzma2Decoder, LzmaLzma2Encoder},
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LzmaDict {
     pub buf: Vec<u8>,
     pub pos: usize,
@@ -24,19 +24,19 @@ pub struct LzmaDict {
     pub size: usize,
     pub need_reset: bool,
 }
-// impl Default for LzmaDict {
-//     fn default() -> Self {
-//         // 使用一个空的 Vec<u8> 来初始化 buf
-//         LzmaDict {
-//             buf: Vec::new(), // 初始化为一个空 Vec
-//             pos: 0,
-//             full: 0,
-//             limit: 0,
-//             size: 0,
-//             need_reset: false,
-//         }
-//     }
-// }
+impl Default for LzmaDict {
+    fn default() -> Self {
+        // 使用一个空的 Vec<u8> 来初始化 buf
+        LzmaDict {
+            buf: Vec::new(), // 初始化为一个空 Vec
+            pos: 0,
+            full: 0,
+            limit: 0,
+            size: 0,
+            need_reset: false,
+        }
+    }
+}
 pub struct LzmaLzDecoderOptions {
     pub dict_size: usize,
     pub preset_dict: Vec<u8>,
@@ -57,7 +57,7 @@ pub enum LzCoderType {
     LzmaDecoder(LzmaLzma1Decoder),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LzmaLzDecoder {
     pub coder: Option<LzCoderType>,
     pub code: Option<
@@ -75,17 +75,17 @@ pub struct LzmaLzDecoder {
     pub end: Option<fn(coder: &mut LzCoderType)>,
 }
 
-// impl Default for LzmaLzDecoder {
-//     fn default() -> Self {
-//         LzmaLzDecoder {
-//             coder: None,            // 假设 LzCoderType 实现了 Default
-//             code: None,             // Option 类型默认是 None
-//             reset: None,            // Option 类型默认是 None
-//             set_uncompressed: None, // Option 类型默认是 None
-//             end: None,              // Option 类型默认是 None
-//         }
-//     }
-// }
+impl Default for LzmaLzDecoder {
+    fn default() -> Self {
+        LzmaLzDecoder {
+            coder: None,            // 假设 LzCoderType 实现了 Default
+            code: None,             // Option 类型默认是 None
+            reset: None,            // Option 类型默认是 None
+            set_uncompressed: None, // Option 类型默认是 None
+            end: None,              // Option 类型默认是 None
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct LzmaDecoder {

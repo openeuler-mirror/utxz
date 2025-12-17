@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use std::default;
+
 use crate::{api::LzmaVli, LZMA_VLI_C};
 
 use super::LzmaReservedEnum;
@@ -96,10 +98,10 @@ impl Clone for LzmaOptionsLzma {
             reserved_int6: self.reserved_int6,
             reserved_int7: self.reserved_int7,
             reserved_int8: self.reserved_int8,
-            reserved_enum1: self.reserved_enum1,
-            reserved_enum2: self.reserved_enum2,
-            reserved_enum3: self.reserved_enum3,
-            reserved_enum4: self.reserved_enum4,
+            reserved_enum1: self.reserved_enum1.clone(),
+            reserved_enum2: self.reserved_enum2.clone(),
+            reserved_enum3: self.reserved_enum3.clone(),
+            reserved_enum4: self.reserved_enum4.clone(),
             // reserved_ptr1: None, // 或者根据需求实现自定义逻辑
             // reserved_ptr2: None, // 或者根据需求实现自定义逻辑
         }

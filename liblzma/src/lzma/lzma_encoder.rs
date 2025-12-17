@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::rangecoder::{bit_reset, bittree_reset};
 use crate::{
     api::{

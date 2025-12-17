@@ -26,7 +26,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 use crate::{
-    api::LzmaRet,
+    api::{LzmaFilter, LzmaRet},
     common::{LzmaFilterInfo, LzmaNextCoder},
 };
 

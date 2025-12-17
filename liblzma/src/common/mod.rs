@@ -4,15 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(clippy::module_inception)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::new_without_default)]
-#![allow(clippy::new_without_default)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::clone_on_copy)]
-#![allow(clippy::enum_variant_names)]
-#![allow(private_interfaces)]
-
 use std::{cell::RefCell, ptr};
 
 use crate::api::{LzmaAction, LzmaCheck, LzmaFilter, LzmaRet, LzmaStream, LzmaVli};

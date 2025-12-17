@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::{
     api::{LzmaCheck, LzmaRet, LzmaStreamFlags, LZMA_VLI_UNKNOWN},
     check::lzma_crc32,

@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::{
     api::{LzmaAction, LzmaDeltaType, LzmaOptionsDelta, LzmaOptionsType, LzmaRet},
     common::{CoderType, LzmaFilterInfo, LzmaNextCoder},

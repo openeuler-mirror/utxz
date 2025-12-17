@@ -44,17 +44,18 @@ pub fn lzma_simple_props_decode(
     }
 
     // 创建新的BCJ选项结构体
-    let opt = LzmaOptionsBcj {
-        start_offset: LittleEndian::read_u32(props),
-    };
+    let mut opt = LzmaOptionsBcj::default();
+
+    // 从小端字节序读取起始偏移量
+    opt.start_offset = LittleEndian::read_u32(props);
 
     // 如果起始偏移量为0，不保存选项结构体
-    // let mut options: Option<LzmaOptionsType> = None;
-    let options: Option<LzmaOptionsType> = if opt.start_offset == 0 {
-        None
+    let mut options: Option<LzmaOptionsType> = None;
+    if opt.start_offset == 0 {
+        options = None;
     } else {
-        Some(LzmaOptionsType::Bcj(opt.clone()))
-    };
+        options = Some(LzmaOptionsType::Bcj(opt.clone()));
+    }
 
     (LzmaRet::Ok, options)
 }

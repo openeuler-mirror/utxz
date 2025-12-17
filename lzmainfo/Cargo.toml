@@ -1,0 +1,12 @@
+[package]
+name = "lzmainfo"
+version.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+common = { path = "../common" }
+#liblzma = { path = "../liblzma" }
+clap = { version = "4.0", features = ["derive"] }
+lzma-rs = "0.1"  # 用于处理 LZMA 文件

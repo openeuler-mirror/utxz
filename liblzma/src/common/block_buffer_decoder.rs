@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-
 use crate::api::{LzmaAction, LzmaAllocator, LzmaBlock, LzmaRet};
 
 use super::{lzma_block_decoder_init, lzma_next_coder_init, lzma_next_end, LzmaNextCoder};

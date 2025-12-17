@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::module_inception)]
 mod check;
 mod crc32_small;
 mod crc64_small;

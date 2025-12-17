@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use common::read32le;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::{
     api::{
@@ -29,6 +30,7 @@ use crate::{
     },
     rc_direct, rc_is_finished, rc_normalize, rc_reset,
 };
+use common::read32le;
 
 use crate::{lzma::update_long_rep, rc_bit, rc_if_0, rc_update_0, rc_update_1};
 
@@ -105,7 +107,7 @@ pub struct LzmaLzma1Decoder {
 
     // State of incomplete symbol
     pub sequence: Sequence,
-    pub probs: Box<[Probability]>, // 使用Box<[Probability]>，拥有数据所有权
+    pub probs: AtomicPtr<Probability>, // 使用Box<[Probability]>，拥有数据所有权
     pub symbol: u32,
     pub limit: u32,
     pub offset: u32,
@@ -144,7 +146,7 @@ impl Default for LzmaLzma1Decoder {
 
             // 初始化不完整符号的状态
             sequence: Sequence::default(), // 假设 Sequence 实现了 Default
-            probs: Box::new([Probability::default(); LITERAL_CODER_SIZE * LITERAL_CODERS_MAX]), // 使用Box::new，拥有数据所有权
+            probs: AtomicPtr::new(ptr::null_mut()), // 使用Box::new，拥有数据所有权
             symbol: 0,
             limit: 0,
             offset: 0,
@@ -239,8 +241,6 @@ pub fn lzma_decode(
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
-    println!("lzma_decode start");
-
     let coder = match coder_ptr {
         LzCoderType::LzmaDecoder(ref mut c) => c,
         _ => return LzmaRet::ProgError,
@@ -269,12 +269,12 @@ pub fn lzma_decode(
     let mut rep3 = coder.rep3;
     let pos_mask = coder.pos_mask;
 
-    let mut probs_line_ref: &mut [u16] = &mut coder.probs; // 初始化coder.probs 的数据
+    let mut probs_line_ref = coder.probs.load(Ordering::SeqCst); // 初始化coder.probs 的数据
     let mut probs_data_offset: isize = 0;
 
     let mut symbol: u32 = coder.symbol;
     let mut limit = coder.limit;
-    println!("limit: {}", limit);
+
     let mut offset = coder.offset;
     let mut len = coder.len;
     let literal_pos_mask = coder.literal_pos_mask;
@@ -284,6 +284,8 @@ pub fn lzma_decode(
     let mut match_bit: u32 = 0;
     let mut subcoder_index: u32 = 0;
     let mut byte: u8 = 0;
+
+    let mut goto_flag = false; // 是否跳转到out处
 
     // 检查是否允许 EOPM
     let mut eopm_is_valid = coder.uncompressed_size == u64::MAX;
@@ -298,786 +300,920 @@ pub fn lzma_decode(
 
     let mut next_sequence = coder.sequence;
 
-    let mut udate_pos_state = true;
+    let mut udate_pos_state = false; // 第一次循环不用进入判断条件
+    unsafe {
+        loop {
+            if udate_pos_state {
+                pos_state = dict.pos & pos_mask as usize;
+                udate_pos_state = false;
+            }
 
-    loop {
-        if udate_pos_state {
-            pos_state = dict.pos & pos_mask as usize;
-            udate_pos_state = false;
+            match next_sequence {
+                // 核心分支1
+                Sequence::Normalize | Sequence::IsMatch => {
+                    if might_finish_without_eopm && dict.pos == dict.limit {
+                        rc_normalize!(
+                            rc,
+                            coder.sequence = Sequence::Normalize,
+                            rc_in_pos,
+                            in_size,
+                            input
+                        );
+                        if rc.code == 0 {
+                            ret = LzmaRet::StreamEnd;
+                            break;
+                        }
+                        if !coder.allow_eopm {
+                            ret = LzmaRet::DataError;
+                            break;
+                        }
+                        eopm_is_valid = true;
+                    }
 
-            // prinnt probs
-            // println!("probs: {:?}", probs);
-        }
+                    if rc_if_0!(
+                        rc,
+                        coder.is_match[state as usize][pos_state as usize],
+                        coder.sequence = Sequence::IsMatch,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        //println!("is_match[{}][{}]: {}, rc_bound: {}, rc.code: {}, rc.range: {}, rc_in_pos: {}, in_size: {}, input[rc_in_pos]: {}", state, pos_state, coder.is_match[state as usize][pos_state as usize], rc_bound, rc.code, rc.range, rc_in_pos,in_size,input[rc_in_pos]);
+                        rc_update_0!(
+                            rc,
+                            coder.is_match[state as usize][pos_state as usize],
+                            rc_bound
+                        );
 
-        match next_sequence {
-            // 核心分支1
-            Sequence::Normalize | Sequence::IsMatch => {
-                println!("next_sequence: {:?}", next_sequence);
-                println!("rc.range: {}", rc.range);
+                        //println!("is_match[{}][{}]: {}, rc_bound: {}, rc.code: {}, rc.range: {}, rc_in_pos: {}, in_size: {}, input[rc_in_pos]: {}", state, pos_state, coder.is_match[state as usize][pos_state as usize], rc_bound, rc.code, rc.range, rc_in_pos,in_size,input[rc_in_pos]);
 
-                if rc.range == 104741472 {
-                    println!("rc.range: {}", rc.range);
+                        // 字面量解析
+                        let dg = dict_get(&dict, 0);
+
+                        let index = ((dict.pos & literal_pos_mask as usize)
+                            << literal_context_bits as usize)
+                            + ((dg as u32 >> (8 - literal_context_bits)) as usize);
+                        probs_line_ref = coder.literal[index].as_mut_ptr();
+
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        symbol = 1;
+
+                        if state < LIT_STATES.try_into().unwrap() {
+                            next_sequence = Sequence::Literal;
+                        } else {
+                            len = (dict_get(&dict, rep0) as u32) << 1;
+                            offset = 0x100;
+                            next_sequence = Sequence::LiteralMatched;
+                        }
+                    } else {
+                        //从C语言的代码可以看出，这个分支在 rc_if_0 为真的时候，是执行不到的，因为在LiteralWrite 中有个continue,所以这段代码放到 else 中，和C 语言的稍有区别，C 语言没有这个else
+                        rc_update_1!(
+                            rc,
+                            coder.is_match[state as usize][pos_state as usize],
+                            rc_bound
+                        );
+
+                        next_sequence = Sequence::IsRep;
+                    }
+                }
+                // 承接 Is match 分支
+                Sequence::Literal => {
+                    // 解码字面量（无匹配字节）
+                    while symbol < (1 << 8) {
+                        // rc_bit!(
+                        //     rc,
+                        //     probs_line_ref[(symbol as isize+ probs_data_offset) as usize],
+                        //     symbol,
+                        //     (),
+                        //     (),
+                        //     rc_in_pos,
+                        //     in_size,
+                        //     input,
+                        //     rc_bound,
+                        //     coder.sequence = Sequence::Literal,
+                        //     goto_flag
+                        // );
+                        if rc.range < (1 << 24) {
+                            if rc_in_pos == in_size {
+                                goto_flag = true;
+                                coder.sequence = Sequence::Literal;
+                                break;
+                            }
+                            rc.range <<= 8;
+                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
+                            rc_in_pos += 1;
+                        }
+                        rc_bound = (rc.range >> 11).wrapping_mul(
+                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
+                                as u32,
+                        );
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur + (((1 << 11) - cur) >> 5));
+                            p.write(new_val);
+                            symbol = (symbol << 1);
+                        } else {
+                            rc.range = rc.range.wrapping_sub(rc_bound);
+                            rc.code = rc.code.wrapping_sub(rc_bound);
+
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur - ((cur) >> 5));
+                            p.write(new_val);
+
+                            symbol = (symbol << 1) + 1;
+                        }
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    state = NEXT_STATE[state as usize];
+
+                    next_sequence = Sequence::LiteralWrite;
+                }
+                // 承接 Is match 分支
+                Sequence::LiteralMatched => {
+                    // 解码字面量（有匹配字节）
+                    while symbol < (1 << 8) {
+                        let match_bit = len & offset;
+                        let subcoder_index = offset + match_bit + symbol;
+                        // rc_bit!(
+                        //     rc,
+                        //     probs_line_ref[(subcoder_index as isize + probs_data_offset) as usize],
+                        //     symbol,
+                        //     offset = offset & !match_bit,
+                        //     offset = offset & match_bit,
+                        //     rc_in_pos,
+                        //     in_size,
+                        //     input,
+                        //     rc_bound,
+                        //     coder.sequence = Sequence::LiteralMatched,
+                        //     goto_flag
+                        // );
+
+                        if rc.range < (1 << 24) {
+                            if rc_in_pos == in_size {
+                                goto_flag = true;
+                                coder.sequence = Sequence::LiteralMatched;
+                                break;
+                            }
+                            rc.range <<= 8;
+                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
+                            rc_in_pos += 1;
+                        }
+                        rc_bound = (rc.range >> 11).wrapping_mul(
+                            *probs_line_ref.offset(subcoder_index as isize + probs_data_offset)
+                                as u32,
+                        );
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+
+                            let p =
+                                probs_line_ref.offset(subcoder_index as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur + (((1 << 11) - cur) >> 5));
+                            p.write(new_val);
+                            symbol = (symbol << 1);
+                            offset = offset & !match_bit;
+                        } else {
+                            rc.range = rc.range.wrapping_sub(rc_bound);
+                            rc.code = rc.code.wrapping_sub(rc_bound);
+
+                            let p =
+                                probs_line_ref.offset(subcoder_index as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur - ((cur) >> 5));
+                            p.write(new_val);
+
+                            symbol = (symbol << 1) + 1;
+                            offset = offset & match_bit;
+                        }
+
+                        len <<= 1;
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    state = NEXT_STATE[state as usize];
+                    next_sequence = Sequence::LiteralWrite;
                 }
 
-                if might_finish_without_eopm && dict.pos == dict.limit {
+                Sequence::LiteralWrite => {
+                    if dict_put(&mut dict, symbol as u8) {
+                        coder.sequence = Sequence::LiteralWrite;
+                        break;
+                    }
+                    next_sequence = Sequence::IsMatch;
+                    udate_pos_state = true;
+                    continue;
+                }
+                //// 核心分支2  这里是一个阶段， 直到 Sequence::IsRep 开始
+                Sequence::IsRep => {
+                    if rc_if_0!(
+                        rc,
+                        coder.is_rep[state as usize],
+                        next_sequence = Sequence::IsRep,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        // 不是重复匹配
+                        rc_update_0!(rc, coder.is_rep[state as usize], rc_bound);
+
+                        let mut new_state = state;
+                        update_match(&mut new_state);
+                        state = new_state;
+
+                        // 保存最近的三个匹配距离，以防有重复匹配
+                        rep3 = rep2;
+                        rep2 = rep1;
+                        rep1 = rep0;
+
+                        next_sequence = Sequence::MatchLenChoice;
+                    } else {
+                        rc_update_1!(rc, coder.is_rep[state as usize], rc_bound);
+                        if !dict_is_distance_valid(&dict, 0) {
+                            ret = LzmaRet::DataError;
+                            break;
+                        }
+
+                        next_sequence = Sequence::IsRep0;
+                    }
+                }
+
+                // 承接 IsRep 分支 rc_if_0 分支
+                Sequence::MatchLenChoice => {
+                    if rc.range < (1 << 24) {
+                        if rc_in_pos == in_size {
+                            coder.sequence = Sequence::MatchLenChoice;
+                            break;
+                        }
+                        rc.range <<= 8;
+                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc_in_pos += 1;
+                    }
+                    rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice);
+
+                    // 根据概率解码
+                    if rc.code < rc_bound {
+                        rc.range = rc_bound;
+                        coder.match_len_decoder.choice +=
+                            ((1 << 11) - coder.match_len_decoder.choice) >> 5;
+                        probs_line_ref =
+                            coder.match_len_decoder.low[pos_state as usize].as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 3);
+                        len = 2;
+                        symbol = 1;
+                        next_sequence = Sequence::MatchLenBitTree;
+                    } else {
+                        rc.range -= rc_bound;
+                        rc.code -= rc_bound;
+                        coder.match_len_decoder.choice -= coder.match_len_decoder.choice >> 5;
+                        next_sequence = Sequence::MatchLenChoice2;
+                    }
+                }
+                Sequence::MatchLenChoice2 => {
+                    if rc.range < (1 << 24) {
+                        if rc_in_pos == in_size {
+                            coder.sequence = Sequence::MatchLenChoice2;
+                            break;
+                        }
+                        rc.range <<= 8;
+                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc_in_pos += 1;
+                    }
+                    rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice2);
+                    if rc.code < rc_bound {
+                        rc.range = rc_bound;
+                        coder.match_len_decoder.choice2 +=
+                            ((1 << 11) - coder.match_len_decoder.choice2) >> 5;
+                        probs_line_ref =
+                            coder.match_len_decoder.mid[pos_state as usize].as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 3);
+                        len = 2 + (1 << 3);
+                    } else {
+                        rc.range -= rc_bound;
+                        rc.code -= rc_bound;
+                        coder.match_len_decoder.choice2 -= (coder.match_len_decoder.choice2) >> 5;
+
+                        probs_line_ref = coder.match_len_decoder.high.as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 8);
+                        len = 2 + (1 << 3) + (1 << 3);
+                    }
+                    symbol = 1;
+                    next_sequence = Sequence::MatchLenBitTree; // 走向了 slot
+                }
+                Sequence::MatchLenBitTree => {
+                    while symbol < limit {
+                        if rc.range < (1 << 24) {
+                            if rc_in_pos == in_size {
+                                goto_flag = true;
+                                coder.sequence = Sequence::MatchLenBitTree;
+                                break;
+                            }
+                            rc.range <<= 8;
+                            rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                            rc_in_pos += 1;
+                        }
+
+                        rc_bound = (rc.range >> 11)
+                            * u32::from(
+                                *probs_line_ref
+                                    .offset((symbol as isize + probs_data_offset) as isize),
+                            );
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] += ((1 << 11) - probs_line_ref[(symbol as isize + probs_data_offset) as usize]) >> 5;
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur + (((1 << 11) - cur) >> 5));
+                            p.write(new_val);
+                            symbol <<= 1;
+                        } else {
+                            rc.range -= rc_bound;
+                            rc.code -= rc_bound;
+                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] -= probs_line_ref[(symbol as isize + probs_data_offset) as usize] >> 5;
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur - ((cur) >> 5));
+                            p.write(new_val);
+                            symbol = (symbol << 1) + 1;
+                        }
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    len += symbol - limit;
+                    let tmp = get_dist_state(len);
+                    probs_line_ref = coder.dist_slot[get_dist_state(len) as usize].as_mut_ptr();
+                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                    symbol = 1;
+                    next_sequence = Sequence::DistSlot;
+                }
+                Sequence::DistSlot => {
+                    while symbol < DIST_SLOTS as u32 {
+                        // rc_bit!(
+                        //     rc,
+                        //     probs_line_ref[(symbol as isize + probs_data_offset) as usize],
+                        //     symbol,
+                        //     (),
+                        //     (),
+                        //     rc_in_pos,
+                        //     in_size,
+                        //     input,
+                        //     rc_bound,
+                        //     coder.sequence = Sequence::DistSlot,
+                        //     goto_flag
+                        // );
+
+                        if rc.range < crate::rangecoder::range_common::RC_TOP_VALUE {
+                            if rc_in_pos == in_size {
+                                goto_flag = true;
+                                coder.sequence = Sequence::DistSlot;
+                                break;
+                            }
+                            rc.range <<= crate::rangecoder::range_common::RC_SHIFT_BITS;
+                            rc.code = (rc.code << crate::rangecoder::range_common::RC_SHIFT_BITS)
+                                | (input[rc_in_pos] as u32);
+                            rc_in_pos += 1;
+                        }
+                        rc_bound = (rc.range >> 11).wrapping_mul(
+                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
+                                as u32,
+                        );
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+
+                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = ((probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32).wrapping_add(((crate::rangecoder::range_common::RC_BIT_MODEL_TOTAL - probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32) >> crate::rangecoder::range_common::RC_MOVE_BITS))) as u16;
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur + (((1 << 11) - cur) >> 5));
+                            p.write(new_val);
+                            symbol = (symbol << 1);
+                        } else {
+                            rc.range = rc.range.wrapping_sub(rc_bound);
+                            rc.code = rc.code.wrapping_sub(rc_bound);
+
+                            // let tmp = (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 - (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 >> crate::rangecoder::range_common::RC_MOVE_BITS)) as u16;
+                            // // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 - (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 >> crate::rangecoder::range_common::RC_MOVE_BITS)) as u16;
+
+                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = tmp;
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur - ((cur) >> 5));
+                            p.write(new_val);
+
+                            symbol = (symbol << 1) + 1;
+                        }
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    symbol -= DIST_SLOTS as u32;
+                    // println!("symbol = {}", symbol);
+
+                    if symbol < DIST_MODEL_START as u32 {
+                        // Match distances [0, 3] have only two bits.
+                        rep0 = symbol;
+
+                        if !dict_is_distance_valid(&dict, rep0 as usize) {
+                            ret = LzmaRet::DataError;
+                            break;
+                        }
+                        next_sequence = Sequence::Copy;
+                    } else {
+                        // Decode the lowest [1, 29] bits of
+                        // the match distance.
+                        limit = (symbol >> 1) - 1;
+                        // println!("limit = {}", limit);
+                        assert!(limit >= 1 && limit <= 30);
+
+                        rep0 = 2 + (symbol & 1);
+
+                        if (symbol < DIST_MODEL_END.try_into().unwrap()) {
+                            // Prepare to decode the low bits for
+                            // a distance of [4, 127].
+                            assert!(limit <= 5);
+                            rep0 <<= limit;
+                            assert!(rep0 <= 96);
+
+                            // -1 is fine, because we start
+                            // decoding at probs[1], not probs[0].
+                            // NOTE: This violates the C standard,
+                            // since we are doing pointer
+                            // arithmetic past the beginning of
+                            // the array.
+                            // 等价于C代码中的: assert((int32_t)(rep0 - symbol - 1) >= -1);
+                            // 在C中，当rep0 < symbol + 1时，无符号减法会溢出，转换为int32_t后为负数
+                            // 但在这种情况下，我们仍然允许-1，因为注释说明"从probs[1]开始解码，而不是probs[0]"
+                            assert!((rep0 as i32 - symbol as i32 - 1) >= -1);
+
+                            let base: isize = (rep0 as isize) - (symbol as isize) - 1;
+                            assert!(base <= 82);
+                            assert!(base >= -1 && base <= (coder.pos_special.len() as isize) - 1); // 对应 C 的断言
+                                                                                                   // 只允许 base >= 0 时用切片，否则 panic 或特殊处理
+
+                            probs_line_ref = if base >= 0 {
+                                probs_data_offset = 0;
+
+                                coder.pos_special[(base) as usize..].as_mut_ptr()
+                            //这里还是使用实际的位置，通过 probs_data_offset 和C代码保持一致，抵消总是从 probs[1] 计算的影响
+                            } else {
+                                // base == -1 时，probs[1] 恰好是 pos_special[0]
+                                // 这里可以用偏移量修正
+                                probs_data_offset = -1;
+                                coder.pos_special[0..].as_mut_ptr()
+                            };
+
+                            //  probs_line_ref = &mut coder.pos_special[(rep0 - symbol - 1) as usize..];
+                            symbol = 1;
+                            offset = 0;
+                            next_sequence = Sequence::DistModel;
+                        } else {
+                            assert!(symbol >= 14);
+                            assert!(limit >= 6);
+                            limit -= ALIGN_BITS as u32;
+
+                            assert!(limit >= 2);
+
+                            next_sequence = Sequence::Direct;
+                        }
+                    }
+                }
+                Sequence::DistModel => {
+                    while offset < limit as u32 {
+                        // rc_bit!(
+                        //     rc,
+                        //     probs_line_ref[(symbol as isize + probs_data_offset) as usize],
+                        //     symbol,
+                        //     (),
+                        //     rep0 = rep0 + (1 << offset),
+                        //     rc_in_pos,
+                        //     in_size,
+                        //     input,
+                        //     rc_bound,
+                        //     coder.sequence = Sequence::DistModel,
+                        //     goto_flag
+                        // );
+
+                        if rc.range < (1 << 24) {
+                            if rc_in_pos == in_size {
+                                goto_flag = true;
+                                coder.sequence = Sequence::DistModel;
+                                break;
+                            }
+                            rc.range <<= 8;
+                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
+                            rc_in_pos += 1;
+                        }
+                        rc_bound = (rc.range >> 11).wrapping_mul(
+                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
+                                as u32,
+                        );
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur + (((1 << 11) - cur) >> 5));
+                            p.write(new_val);
+                            symbol = (symbol << 1);
+                        } else {
+                            rc.range = rc.range.wrapping_sub(rc_bound);
+                            rc.code = rc.code.wrapping_sub(rc_bound);
+
+                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
+                            let cur = p.read();
+                            let new_val = (cur - ((cur) >> 5));
+                            p.write(new_val);
+
+                            symbol = (symbol << 1) + 1;
+                            rep0 = rep0 + (1 << offset);
+                        }
+
+                        offset += 1;
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    if !dict_is_distance_valid(&dict, rep0 as usize) {
+                        ret = LzmaRet::DataError;
+                        break;
+                    }
+                    next_sequence = Sequence::Copy;
+                }
+                Sequence::Direct => {
+                    while limit > 0 {
+                        rc_direct!(
+                            rc,
+                            rep0,
+                            coder.sequence = Sequence::Direct,
+                            rc_in_pos,
+                            in_size,
+                            input,
+                            rc_bound,
+                            goto_flag
+                        );
+                        limit -= 1;
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    rep0 <<= ALIGN_BITS;
+                    symbol = 1;
+                    offset = 0;
+
+                    next_sequence = Sequence::Align;
+                }
+                Sequence::Align => {
+                    while offset < ALIGN_BITS as u32 {
+                        rc_bit!(
+                            rc,
+                            coder.pos_align[symbol as usize],
+                            symbol,
+                            (),
+                            rep0 = rep0 + (1 << offset),
+                            rc_in_pos,
+                            in_size,
+                            input,
+                            rc_bound,
+                            coder.sequence = Sequence::Align,
+                            goto_flag
+                        );
+                        offset += 1;
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
+                    }
+                    if rep0 == u32::MAX {
+                        if !eopm_is_valid {
+                            ret = LzmaRet::DataError;
+                            break;
+                        }
+                        next_sequence = Sequence::Eopm;
+                    } else {
+                        if !dict_is_distance_valid(&dict, rep0 as usize) {
+                            ret = LzmaRet::DataError;
+                            break;
+                        }
+                        next_sequence = Sequence::Copy;
+                    }
+                }
+                Sequence::Eopm => {
+                    //  IsRep中的if 执行完，执行的这里，循环肯定会退出
                     rc_normalize!(
                         rc,
-                        coder.sequence = Sequence::Normalize,
+                        coder.sequence = Sequence::Eopm,
                         rc_in_pos,
                         in_size,
                         input
                     );
-                    if rc.code == 0 {
-                        ret = LzmaRet::StreamEnd;
-                        break;
-                    }
-                    if !coder.allow_eopm {
-                        ret = LzmaRet::DataError;
-                        break;
-                    }
-                    eopm_is_valid = true;
-                }
-
-                if rc_if_0!(
-                    rc,
-                    coder.is_match[state as usize][pos_state as usize],
-                    coder.sequence = Sequence::IsMatch,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    //println!("is_match[{}][{}]: {}, rc_bound: {}, rc.code: {}, rc.range: {}, rc_in_pos: {}, in_size: {}, input[rc_in_pos]: {}", state, pos_state, coder.is_match[state as usize][pos_state as usize], rc_bound, rc.code, rc.range, rc_in_pos,in_size,input[rc_in_pos]);
-                    rc_update_0!(
-                        rc,
-                        coder.is_match[state as usize][pos_state as usize],
-                        rc_bound
-                    );
-
-                    //println!("is_match[{}][{}]: {}, rc_bound: {}, rc.code: {}, rc.range: {}, rc_in_pos: {}, in_size: {}, input[rc_in_pos]: {}", state, pos_state, coder.is_match[state as usize][pos_state as usize], rc_bound, rc.code, rc.range, rc_in_pos,in_size,input[rc_in_pos]);
-
-                    // 字面量解析
-                    let dg = dict_get(&dict, 0);
-                    println!("dg: {}", dg);
-
-                    probs_line_ref = literal_subcoder_mut(
-                        &mut coder.literal,
-                        literal_context_bits,
-                        literal_pos_mask,
-                        dict.pos,
-                        dg,
-                    );
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-
-                    //println!("probs: {:?}", probs_line_ref);
-                    symbol = 1;
-
-                    if state < LIT_STATES.try_into().unwrap() {
-                        next_sequence = Sequence::Literal;
+                    ret = if rc_is_finished!(rc) {
+                        LzmaRet::StreamEnd
                     } else {
-                        len = (dict_get(&dict, rep0) as u32) << 1;
-                        offset = 0x100;
-                        next_sequence = Sequence::LiteralMatched;
-                    }
-                } else {
-                    //从C语言的代码可以看出，这个分支在 rc_if_0 为真的时候，是执行不到的，因为在LiteralWrite 中有个continue,所以这段代码放到 else 中，和C 语言的稍有区别，C 语言没有这个else
-                    rc_update_1!(
-                        rc,
-                        coder.is_match[state as usize][pos_state as usize],
-                        rc_bound
-                    );
-
-                    if rc.code == 212630291 {
-                        println!("rc.code: {}", rc.code);
-                    }
-                    next_sequence = Sequence::IsRep;
-                }
-            }
-            // 承接 Is match 分支
-            Sequence::Literal => {
-                println!("next_sequence: {:?}", next_sequence);
-                // 解码字面量（无匹配字节）
-                while symbol < (1 << 8) {
-                    rc_bit!(
-                        rc,
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        symbol,
-                        (),
-                        (),
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound,
-                        coder.sequence = Sequence::Literal
-                    );
-                }
-                state = NEXT_STATE[state as usize];
-
-                next_sequence = Sequence::LiteralWrite;
-            }
-            // 承接 Is match 分支
-            Sequence::LiteralMatched => {
-                println!("next_sequence: {:?}", next_sequence);
-                // 解码字面量（有匹配字节）
-                while symbol < (1 << 8) {
-                    let match_bit = len & offset;
-                    let subcoder_index = offset + match_bit + symbol;
-                    rc_bit!(
-                        rc,
-                        probs_line_ref[(subcoder_index as isize + probs_data_offset) as usize],
-                        symbol,
-                        offset = offset & !match_bit,
-                        offset = offset & match_bit,
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound,
-                        coder.sequence = Sequence::LiteralMatched
-                    );
-                    len <<= 1;
-                }
-                state = NEXT_STATE[state as usize];
-                next_sequence = Sequence::LiteralWrite;
-            }
-
-            Sequence::LiteralWrite => {
-                println!("next_sequence: {:?}", next_sequence);
-                if dict_put(&mut dict, symbol as u8) {
-                    coder.sequence = Sequence::LiteralWrite;
+                        LzmaRet::DataError
+                    };
                     break;
                 }
-                next_sequence = Sequence::IsMatch;
-                udate_pos_state = true;
-                continue;
-            }
-            //// 核心分支2  这里是一个阶段， 直到 Sequence::IsRep 开始
-            Sequence::IsRep => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc_if_0!(
-                    rc,
-                    coder.is_rep[state as usize],
-                    next_sequence = Sequence::IsRep,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    // 不是重复匹配
-                    rc_update_0!(rc, coder.is_rep[state as usize], rc_bound);
 
-                    let mut new_state = state;
-                    update_match(&mut new_state);
-                    state = new_state;
+                // 承接 IsRep rc_if_0  的 else 分支
+                Sequence::IsRep0 => {
+                    if rc_if_0!(
+                        rc,
+                        coder.is_rep0[state as usize],
+                        coder.sequence = Sequence::IsRep0,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        rc_update_0!(rc, coder.is_rep0[state as usize], rc_bound);
+                        next_sequence = Sequence::IsRep0Long;
+                    } else {
+                        rc_update_1!(rc, coder.is_rep0[state as usize], rc_bound);
+                        next_sequence = Sequence::IsRep1;
+                    }
+                }
+                // SEQ_IS_REP0 的 tc_if_0 true分支
+                Sequence::IsRep0Long => {
+                    if rc_if_0!(
+                        rc,
+                        coder.is_rep0_long[state as usize][pos_state as usize],
+                        coder.sequence = Sequence::IsRep0Long,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        rc_update_0!(
+                            rc,
+                            coder.is_rep0_long[state as usize][pos_state as usize],
+                            rc_bound
+                        );
 
-                    // 保存最近的三个匹配距离，以防有重复匹配
-                    rep3 = rep2;
-                    rep2 = rep1;
-                    rep1 = rep0;
+                        update_short_rep(&mut state);
 
-                    next_sequence = Sequence::MatchLenChoice;
-                } else {
-                    rc_update_1!(rc, coder.is_rep[state as usize], rc_bound);
-                    if !dict_is_distance_valid(&dict, 0) {
-                        ret = LzmaRet::DataError;
+                        next_sequence = Sequence::ShortRep; // 注意 这个分支执行后，总会continue
+                    } else {
+                        rc_update_1!(
+                            rc,
+                            coder.is_rep0_long[state as usize][pos_state as usize],
+                            rc_bound
+                        );
+
+                        // 这个和C 语言有区别，应该放到这里，因为 if 的true 分支，总是有continue。
+                        update_long_rep(&mut state);
+
+                        // Decode the length of the repeated match.
+                        next_sequence = Sequence::RepLenChoice;
+                    }
+                }
+                Sequence::ShortRep => {
+                    let byte = dict_get(&dict, rep0);
+                    if dict_put(&mut dict, byte) {
                         break;
                     }
-
-                    next_sequence = Sequence::IsRep0;
+                    next_sequence = Sequence::IsMatch;
+                    udate_pos_state = true;
+                    continue;
                 }
-            }
 
-            // 承接 IsRep 分支 rc_if_0 分支
-            Sequence::MatchLenChoice => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc.range < (1 << 24) {
-                    if rc_in_pos == in_size {
-                        coder.sequence = Sequence::MatchLenChoice;
-                        break;
+                Sequence::IsRep1 => {
+                    if rc_if_0!(
+                        rc,
+                        coder.is_rep1[state as usize],
+                        coder.sequence = Sequence::IsRep1,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        rc_update_0!(rc, coder.is_rep1[state as usize], rc_bound);
+
+                        let distance = rep1;
+                        rep1 = rep0;
+                        rep0 = distance;
+
+                        update_long_rep(&mut state);
+
+                        // Decode the length of the repeated match.
+                        next_sequence = Sequence::RepLenChoice;
+                    } else {
+                        rc_update_1!(rc, coder.is_rep1[state as usize], rc_bound);
+                        next_sequence = Sequence::IsRep2;
                     }
-                    rc.range <<= 8;
-                    rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
-                    rc_in_pos += 1;
                 }
-                rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice);
 
-                // 根据概率解码
-                if rc.code < rc_bound {
-                    rc.range = rc_bound;
-                    coder.match_len_decoder.choice +=
-                        ((1 << 11) - coder.match_len_decoder.choice) >> 5;
-                    probs_line_ref = &mut coder.match_len_decoder.low[pos_state as usize];
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 3);
-                    println!("Sequence::MatchLenChoice limit: {}", limit);
-                    len = 2;
-                    symbol = 1;
-                    next_sequence = Sequence::MatchLenBitTree;
-                } else {
-                    rc.range -= rc_bound;
-                    rc.code -= rc_bound;
-                    coder.match_len_decoder.choice -= coder.match_len_decoder.choice >> 5;
-                    next_sequence = Sequence::MatchLenChoice2;
-                }
-            }
-            Sequence::MatchLenChoice2 => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc.range < (1 << 24) {
-                    if rc_in_pos == in_size {
-                        coder.sequence = Sequence::MatchLenChoice2;
-                        break;
+                Sequence::IsRep2 => {
+                    if rc_if_0!(
+                        rc,
+                        coder.is_rep2[state as usize],
+                        coder.sequence = Sequence::IsRep2,
+                        rc_in_pos,
+                        in_size,
+                        input,
+                        rc_bound,
+                        goto_flag
+                    ) {
+                        rc_update_0!(rc, coder.is_rep2[state as usize], rc_bound);
+                        let distance = rep2;
+                        rep2 = rep1;
+                        rep1 = rep0;
+                        rep0 = distance;
+                    } else {
+                        rc_update_1!(rc, coder.is_rep2[state as usize], rc_bound);
+                        let distance = rep3;
+                        rep3 = rep2;
+                        rep2 = rep1;
+                        rep1 = rep0;
+                        rep0 = distance;
                     }
-                    rc.range <<= 8;
-                    rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
-                    rc_in_pos += 1;
-                }
-                rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice2);
-                if rc.code < rc_bound {
-                    rc.range = rc_bound;
-                    coder.match_len_decoder.choice2 +=
-                        ((1 << 11) - coder.match_len_decoder.choice2) >> 5;
-                    probs_line_ref = &mut coder.match_len_decoder.mid[pos_state as usize];
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 3);
-                    println!("Sequence::MatchLenChoice2 limit: {}", limit);
-                    len = 2 + (1 << 3);
-                } else {
-                    rc.range -= rc_bound;
-                    rc.code -= rc_bound;
-                    coder.match_len_decoder.choice2 -= (coder.match_len_decoder.choice2) >> 5;
+                    update_long_rep(&mut state);
 
-                    probs_line_ref = &mut coder.match_len_decoder.high;
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 8);
-                    println!("Sequence::MatchLenChoice2 limit: {}", limit);
-                    len = 2 + (1 << 3) + (1 << 3);
+                    // Decode the length of the repeated match.
+                    // len_decode(len, coder.rep_len_decoder, pos_state, SEQ_REP_LEN);
+                    next_sequence = Sequence::RepLenChoice;
                 }
-                symbol = 1;
-                next_sequence = Sequence::MatchLenBitTree;
-            }
-            Sequence::MatchLenBitTree => {
-                println!("next_sequence: {:?}", next_sequence);
-                while symbol < limit {
+                Sequence::RepLenChoice => {
                     if rc.range < (1 << 24) {
                         if rc_in_pos == in_size {
-                            coder.sequence = Sequence::MatchLenBitTree;
+                            coder.sequence = Sequence::RepLenChoice;
                             break;
                         }
                         rc.range <<= 8;
                         rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
                         rc_in_pos += 1;
                     }
+                    rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice);
 
-                    rc_bound = (rc.range >> 11)
-                        * u32::from(probs_line_ref[(symbol as isize + probs_data_offset) as usize]);
+                    // 根据概率解码
                     if rc.code < rc_bound {
                         rc.range = rc_bound;
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize] += ((1
-                            << 11)
-                            - probs_line_ref[(symbol as isize + probs_data_offset) as usize])
-                            >> 5;
-                        symbol <<= 1;
+                        coder.rep_len_decoder.choice +=
+                            ((1 << 11) - coder.rep_len_decoder.choice) >> 5;
+                        probs_line_ref = coder.rep_len_decoder.low[pos_state as usize].as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 3);
+                        len = 2;
+                        symbol = 1;
+                        next_sequence = Sequence::RepLenBitTree;
                     } else {
                         rc.range -= rc_bound;
                         rc.code -= rc_bound;
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize] -=
-                            probs_line_ref[(symbol as isize + probs_data_offset) as usize] >> 5;
-                        symbol = (symbol << 1) + 1;
+                        coder.rep_len_decoder.choice -= coder.rep_len_decoder.choice >> 5;
+                        next_sequence = Sequence::RepLenChoice2;
                     }
                 }
-                len += symbol - limit;
-                probs_line_ref = &mut coder.dist_slot[get_dist_state(len) as usize];
-                probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                symbol = 1;
-                next_sequence = Sequence::DistSlot;
-            }
-            Sequence::DistSlot => {
-                println!("next_sequence: {:?}", next_sequence);
-                println!(
-                    "Sequence::DistSlot symbol: {}, rc_bound: {},  rc.code: {}",
-                    symbol, rc_bound, rc.code
-                );
-
-                while symbol < DIST_SLOTS as u32 {
-                    rc_bit!(
-                        rc,
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        symbol,
-                        (),
-                        (),
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound,
-                        coder.sequence = Sequence::DistSlot
-                    );
-                    println!(
-                        "Sequence::DistSlot symbol: {}, rc_bound: {},  rc.code: {}",
-                        symbol, rc_bound, rc.code
-                    );
-                }
-                symbol -= DIST_SLOTS as u32;
-
-                println!("Sequence::DistSlot symbol: {}", symbol);
-
-                if symbol < DIST_MODEL_START as u32 {
-                    // Match distances [0, 3] have only two bits.
-                    rep0 = symbol;
-
-                    if !dict_is_distance_valid(&dict, rep0 as usize) {
-                        ret = LzmaRet::DataError;
-                        break;
+                Sequence::RepLenChoice2 => {
+                    if rc.range < (1 << 24) {
+                        if rc_in_pos == in_size {
+                            coder.sequence = Sequence::RepLenChoice2;
+                            break;
+                        }
+                        rc.range <<= 8;
+                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc_in_pos += 1;
                     }
-                    next_sequence = Sequence::Copy;
-                } else {
-                    // Decode the lowest [1, 29] bits of
-                    // the match distance.
-                    limit = (symbol >> 1) - 1;
-                    println!("Sequence::DistSlot limit: {}", limit);
-
-                    assert!(limit >= 1 && limit <= 30);
-
-                    rep0 = 2 + (symbol & 1);
-
-                    if (symbol < DIST_MODEL_END.try_into().unwrap()) {
-                        // Prepare to decode the low bits for
-                        // a distance of [4, 127].
-                        assert!(limit <= 5);
-                        rep0 <<= limit;
-                        assert!(rep0 <= 96);
-
-                        // -1 is fine, because we start
-                        // decoding at probs[1], not probs[0].
-                        // NOTE: This violates the C standard,
-                        // since we are doing pointer
-                        // arithmetic past the beginning of
-                        // the array.
-                        // 等价于C代码中的: assert((int32_t)(rep0 - symbol - 1) >= -1);
-                        // 在C中，当rep0 < symbol + 1时，无符号减法会溢出，转换为int32_t后为负数
-                        // 但在这种情况下，我们仍然允许-1，因为注释说明"从probs[1]开始解码，而不是probs[0]"
-                        assert!((rep0 as i32 - symbol as i32 - 1) >= -1);
-
-                        let base: isize = (rep0 as isize) - (symbol as isize) - 1;
-                        assert!(base <= 82);
-                        assert!(base >= -1 && base <= (coder.pos_special.len() as isize) - 1); // 对应 C 的断言
-                                                                                               // 只允许 base >= 0 时用切片，否则 panic 或特殊处理
-
-                        probs_line_ref = if base >= 0 {
-                            probs_data_offset = -1;
-
-                            &mut coder.pos_special[(base + 1) as usize..] //这里还是使用实际的位置，通过 probs_data_offset 和C代码保持一致，抵消总是从 probs[1] 计算的影响
-                        } else {
-                            // base == -1 时，probs[1] 恰好是 pos_special[0]
-                            // 这里可以用偏移量修正
-                            probs_data_offset = 0;
-                            &mut coder.pos_special[0..]
-                        };
-
-                        //  probs_line_ref = &mut coder.pos_special[(rep0 - symbol - 1) as usize..];
-                        symbol = 1;
-                        offset = 0;
-                        next_sequence = Sequence::DistModel;
+                    rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice2);
+                    if rc.code < rc_bound {
+                        rc.range = rc_bound;
+                        coder.rep_len_decoder.choice2 +=
+                            ((1 << 11) - coder.rep_len_decoder.choice2) >> 5;
+                        probs_line_ref = coder.rep_len_decoder.mid[pos_state as usize].as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 3);
+                        len = 2 + (1 << 3);
                     } else {
-                        assert!(symbol >= 14);
-                        assert!(limit >= 6);
-                        limit -= ALIGN_BITS as u32;
-                        println!("Sequence::DistSlot limit: {}", limit);
+                        rc.range -= rc_bound;
+                        rc.code -= rc_bound;
+                        coder.rep_len_decoder.choice2 -= (coder.rep_len_decoder.choice2) >> 5;
 
-                        assert!(limit >= 2);
-
-                        next_sequence = Sequence::Direct;
+                        probs_line_ref = coder.rep_len_decoder.high.as_mut_ptr();
+                        probs_data_offset = 0; // 重置 probs_data_offset 为 0
+                        limit = (1 << 8);
+                        len = 2 + (1 << 3) + (1 << 3);
                     }
-                }
-            }
-            Sequence::DistModel => {
-                println!("next_sequence: {:?}", next_sequence);
-
-                while offset < limit as u32 {
-                    println!(
-                        "probs_line_ref: {:?}  symbol: {}",
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        symbol
-                    );
-
-                    let old_symbol = symbol;
-
-                    rc_bit!(
-                        rc,
-                        probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        symbol,
-                        (),
-                        rep0 = rep0 + (1 << offset),
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound,
-                        coder.sequence = Sequence::DistModel
-                    );
-
-                    println!(
-                        "probs_line_ref: {:?}  symbol: {}",
-                        probs_line_ref[(old_symbol as isize + probs_data_offset) as usize],
-                        old_symbol
-                    );
-                    offset += 1;
-                }
-                if !dict_is_distance_valid(&dict, rep0 as usize) {
-                    ret = LzmaRet::DataError;
-                    break;
-                }
-                next_sequence = Sequence::Copy;
-            }
-            Sequence::Direct => {
-                println!("next_sequence: {:?}", next_sequence);
-                while limit > 0 {
-                    rc_direct!(
-                        rc,
-                        rep0,
-                        coder.sequence = Sequence::Direct,
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound
-                    );
-                    limit -= 1;
-                    println!("limit: {}", limit);
-                }
-                rep0 <<= ALIGN_BITS;
-                symbol = 1;
-                offset = 0;
-
-                next_sequence = Sequence::Align;
-            }
-            Sequence::Align => {
-                println!("next_sequence: {:?}", next_sequence);
-                if (rc.range == 127984384) {
-                    println!("rc.range: {}", rc.range);
-                }
-                while offset < ALIGN_BITS as u32 {
-                    rc_bit!(
-                        rc,
-                        coder.pos_align[symbol as usize],
-                        symbol,
-                        (),
-                        rep0 = rep0 + (1 << offset),
-                        rc_in_pos,
-                        in_size,
-                        input,
-                        rc_bound,
-                        coder.sequence = Sequence::Align
-                    );
-                    offset += 1;
-                }
-                if rep0 == u32::MAX {
-                    if !eopm_is_valid {
-                        ret = LzmaRet::DataError;
-                        break;
-                    }
-                    next_sequence = Sequence::Eopm;
-                } else {
-                    if !dict_is_distance_valid(&dict, rep0 as usize) {
-                        ret = LzmaRet::DataError;
-                        break;
-                    }
-                    next_sequence = Sequence::Copy;
-                }
-            }
-            Sequence::Eopm => {
-                println!("next_sequence: {:?}", next_sequence);
-                //  IsRep中的if 执行完，执行的这里，循环肯定会退出
-                rc_normalize!(
-                    rc,
-                    coder.sequence = Sequence::Eopm,
-                    rc_in_pos,
-                    in_size,
-                    input
-                );
-                ret = if rc_is_finished!(rc) {
-                    LzmaRet::StreamEnd
-                } else {
-                    LzmaRet::DataError
-                };
-                break;
-            }
-
-            // 承接 IsRep rc_if_0  的 else 分支
-            Sequence::IsRep0 => {
-                if rc.code == 6201299 {
-                    println!("Sequence::IsRep0 rc.code: {}", rc.code);
-                }
-                println!("next_sequence: {:?}", next_sequence);
-                if rc_if_0!(
-                    rc,
-                    coder.is_rep0[state as usize],
-                    coder.sequence = Sequence::IsRep0,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    rc_update_0!(rc, coder.is_rep0[state as usize], rc_bound);
-                    next_sequence = Sequence::IsRep0Long;
-                } else {
-                    rc_update_1!(rc, coder.is_rep0[state as usize], rc_bound);
-                    next_sequence = Sequence::IsRep1;
-                }
-            }
-            // SEQ_IS_REP0 的 tc_if_0 true分支
-            Sequence::IsRep0Long => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc_if_0!(
-                    rc,
-                    coder.is_rep0_long[state as usize][pos_state as usize],
-                    coder.sequence = Sequence::IsRep0Long,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    rc_update_0!(
-                        rc,
-                        coder.is_rep0_long[state as usize][pos_state as usize],
-                        rc_bound
-                    );
-
-                    update_short_rep(&mut state);
-
-                    next_sequence = Sequence::ShortRep; // 注意 这个分支执行后，总会continue
-                } else {
-                    rc_update_1!(
-                        rc,
-                        coder.is_rep0_long[state as usize][pos_state as usize],
-                        rc_bound
-                    );
-
-                    // 这个和C 语言有区别，应该放到这里，因为 if 的true 分支，总是有continue。
-                    update_long_rep(&mut state);
-
-                    // Decode the length of the repeated match.
-                    next_sequence = Sequence::RepLenChoice;
-                }
-            }
-            Sequence::ShortRep => {
-                println!("next_sequence: {:?}", next_sequence);
-                let byte = dict_get(&dict, rep0);
-                if dict_put(&mut dict, byte) {
-                    break;
-                }
-                next_sequence = Sequence::IsMatch;
-                udate_pos_state = true;
-                continue;
-            }
-
-            Sequence::IsRep1 => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc_if_0!(
-                    rc,
-                    coder.is_rep1[state as usize],
-                    coder.sequence = Sequence::IsRep1,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    rc_update_0!(rc, coder.is_rep1[state as usize], rc_bound);
-
-                    let distance = rep1;
-                    rep1 = rep0;
-                    rep0 = distance;
-
-                    update_long_rep(&mut state);
-
-                    // Decode the length of the repeated match.
-                    next_sequence = Sequence::RepLenChoice;
-                } else {
-                    rc_update_1!(rc, coder.is_rep1[state as usize], rc_bound);
-                    next_sequence = Sequence::IsRep2;
-                }
-            }
-
-            Sequence::IsRep2 => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc_if_0!(
-                    rc,
-                    coder.is_rep2[state as usize],
-                    coder.sequence = Sequence::IsRep2,
-                    rc_in_pos,
-                    in_size,
-                    input,
-                    rc_bound
-                ) {
-                    rc_update_0!(rc, coder.is_rep2[state as usize], rc_bound);
-                    let distance = rep2;
-                    rep2 = rep1;
-                    rep1 = rep0;
-                    rep0 = distance;
-                } else {
-                    rc_update_1!(rc, coder.is_rep2[state as usize], rc_bound);
-                    let distance = rep3;
-                    rep3 = rep2;
-                    rep2 = rep1;
-                    rep1 = rep0;
-                    rep0 = distance;
-                }
-                update_long_rep(&mut state);
-
-                // Decode the length of the repeated match.
-                // len_decode(len, coder.rep_len_decoder, pos_state, SEQ_REP_LEN);
-                next_sequence = Sequence::RepLenChoice;
-            }
-            Sequence::RepLenChoice => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc.range < (1 << 24) {
-                    if rc_in_pos == in_size {
-                        coder.sequence = Sequence::RepLenChoice;
-                        break;
-                    }
-                    rc.range <<= 8;
-                    rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
-                    rc_in_pos += 1;
-                }
-                rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice);
-
-                // 根据概率解码
-                if rc.code < rc_bound {
-                    rc.range = rc_bound;
-                    coder.rep_len_decoder.choice += ((1 << 11) - coder.rep_len_decoder.choice) >> 5;
-                    probs_line_ref = &mut coder.rep_len_decoder.low[pos_state as usize];
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = 1 << 3;
-                    println!("Sequence::RepLenChoice limit: {}", limit);
-                    len = 2;
                     symbol = 1;
                     next_sequence = Sequence::RepLenBitTree;
-                } else {
-                    rc.range -= rc_bound;
-                    rc.code -= rc_bound;
-                    coder.rep_len_decoder.choice -= coder.rep_len_decoder.choice >> 5;
-                    next_sequence = Sequence::RepLenChoice2;
                 }
-            }
-            Sequence::RepLenChoice2 => {
-                println!("next_sequence: {:?}", next_sequence);
-                if rc.range < (1 << 24) {
-                    if rc_in_pos == in_size {
-                        coder.sequence = Sequence::RepLenChoice2;
+                Sequence::RepLenBitTree => {
+                    while symbol < limit {
+                        if rc.range < (1 << 24) {
+                            if rc_in_pos == in_size {
+                                coder.sequence = Sequence::RepLenBitTree;
+                                break;
+                            }
+                            rc.range <<= 8;
+                            rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                            rc_in_pos += 1;
+                        }
+
+                        rc_bound =
+                            (rc.range >> 11) * u32::from(*probs_line_ref.offset(symbol as isize));
+                        if rc.code < rc_bound {
+                            rc.range = rc_bound;
+
+                            // probs_line_ref.offset(symbol as usize) += ((1 << 11) - probs_line_ref.offset(symbol as usize)) >> 5;
+
+                            // Read current probability, compute updated value and write it back.
+                            let p = probs_line_ref.offset(symbol as isize);
+                            let cur = p.read() as u32;
+                            let new_val = (cur + (((1u32 << 11) - cur) >> 5)) as u16;
+                            p.write(new_val);
+
+                            symbol <<= 1;
+                        } else {
+                            rc.range -= rc_bound;
+                            rc.code -= rc_bound;
+                            // probs_line_ref[symbol as usize] -= probs_line_ref[symbol as usize] >> 5;
+                            let p = probs_line_ref.offset(symbol as isize);
+                            let cur = p.read() as u32;
+                            let new_val = (cur - (cur >> 5)) as u16;
+                            p.write(new_val);
+                            symbol = (symbol << 1) + 1;
+                        }
+                    }
+                    len += symbol - limit;
+
+                    next_sequence = Sequence::Copy;
+                }
+
+                // 核心分支3
+                Sequence::Copy => {
+                    let mut len_usize = len as usize;
+                    if dict_repeat(&mut dict, rep0 as usize, &mut len_usize) {
+                        len = len_usize as u32;
+                        coder.sequence = Sequence::Copy;
                         break;
                     }
-                    rc.range <<= 8;
-                    rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
-                    rc_in_pos += 1;
-                }
-                rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice2);
-                if rc.code < rc_bound {
-                    rc.range = rc_bound;
-                    coder.rep_len_decoder.choice2 +=
-                        ((1 << 11) - coder.rep_len_decoder.choice2) >> 5;
-                    probs_line_ref = &mut coder.rep_len_decoder.mid[pos_state as usize];
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 3);
-                    println!("Sequence::RepLenChoice2 limit: {}", limit);
-                    len = 2 + (1 << 3);
-                } else {
-                    rc.range -= rc_bound;
-                    rc.code -= rc_bound;
-                    coder.rep_len_decoder.choice2 -= (coder.rep_len_decoder.choice2) >> 5;
-
-                    probs_line_ref = &mut coder.rep_len_decoder.high;
-                    probs_data_offset = 0; // 重置 probs_data_offset 为 0
-                    limit = (1 << 8);
-                    println!("Sequence::RepLenChoice2 limit: {}", limit);
-                    len = 2 + (1 << 3) + (1 << 3);
-                }
-                symbol = 1;
-                next_sequence = Sequence::RepLenBitTree;
-            }
-            Sequence::RepLenBitTree => {
-                println!("next_sequence: {:?}", next_sequence);
-                while symbol < limit {
-                    if rc.range < (1 << 24) {
-                        if rc_in_pos == in_size {
-                            coder.sequence = Sequence::RepLenBitTree;
-                            break;
-                        }
-                        rc.range <<= 8;
-                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
-                        rc_in_pos += 1;
-                    }
-
-                    rc_bound = (rc.range >> 11) * u32::from(probs_line_ref[symbol as usize]);
-                    if rc.code < rc_bound {
-                        rc.range = rc_bound;
-                        probs_line_ref[symbol as usize] +=
-                            ((1 << 11) - probs_line_ref[symbol as usize]) >> 5;
-                        symbol <<= 1;
-                    } else {
-                        rc.range -= rc_bound;
-                        rc.code -= rc_bound;
-                        probs_line_ref[symbol as usize] -= probs_line_ref[symbol as usize] >> 5;
-                        symbol = (symbol << 1) + 1;
-                    }
-                }
-                len += symbol - limit;
-
-                next_sequence = Sequence::Copy;
-            }
-
-            // 核心分支3
-            Sequence::Copy => {
-                println!("next_sequence: {:?}", next_sequence);
-
-                let mut len_usize = len as usize;
-                if dict_repeat(&mut dict, rep0 as usize, &mut len_usize) {
                     len = len_usize as u32;
-                    coder.sequence = Sequence::Copy;
-                    break;
+                    next_sequence = Sequence::IsMatch;
+                    udate_pos_state = true;
                 }
-                len = len_usize as u32;
-                next_sequence = Sequence::IsMatch;
-                udate_pos_state = true;
+
+                _ => break,
             }
-
-            _ => break,
         }
-    }
 
-    // 更新状态
-    dictptr.pos = dict.pos;
-    dictptr.full = dict.full;
-    coder.rc = rc;
-    *in_pos = rc_in_pos;
-    coder.state = state;
-    coder.rep0 = rep0;
-    coder.rep1 = rep1;
-    coder.rep2 = rep2;
-    coder.rep3 = rep3;
-    coder.probs = probs_line_ref.to_vec().into_boxed_slice();
-    coder.symbol = symbol;
-    coder.limit = limit;
-    coder.offset = offset;
-    coder.len = len;
+        // out:
+        // 更新状态
+        *dictptr = dict.clone();
+        dictptr.pos = dict.pos;
+        dictptr.full = dict.full;
+        coder.rc = rc;
+        *in_pos = rc_in_pos;
+        coder.state = state;
+        coder.rep0 = rep0;
+        coder.rep1 = rep1;
+        coder.rep2 = rep2;
+        coder.rep3 = rep3;
+        // coder.probs = probs_line_ref.to_vec().into_boxed_slice();
+        coder.probs.store(probs_line_ref, Ordering::SeqCst);
+        coder.symbol = symbol;
+        coder.limit = limit;
+        coder.offset = offset;
+        coder.len = len;
 
-    if coder.uncompressed_size != u64::MAX {
-        coder.uncompressed_size -= (dict.pos - dict_start) as u64;
-        if coder.uncompressed_size == 0
-            && ret == LzmaRet::Ok
-            && (coder.sequence == Sequence::LiteralWrite
-                || coder.sequence == Sequence::ShortRep
-                || coder.sequence == Sequence::Copy)
-        {
-            ret = LzmaRet::DataError;
+        if coder.uncompressed_size != u64::MAX {
+            coder.uncompressed_size -= (dict.pos - dict_start) as u64;
+            if coder.uncompressed_size == 0
+                && ret == LzmaRet::Ok
+                && (coder.sequence == Sequence::LiteralWrite
+                    || coder.sequence == Sequence::ShortRep
+                    || coder.sequence == Sequence::Copy)
+            {
+                ret = LzmaRet::DataError;
+            }
         }
+
+        if ret == LzmaRet::StreamEnd {
+            coder.rc.range = 0xFFFFFFFF;
+            coder.rc.code = 0;
+            coder.rc.init_bytes_left = 5;
+            coder.sequence = Sequence::IsMatch;
+        }
+        ret
     }
-
-    if ret == LzmaRet::StreamEnd {
-        coder.rc.range = 0xFFFFFFFF;
-        coder.rc.code = 0;
-        coder.rc.init_bytes_left = 5;
-        coder.sequence = Sequence::IsMatch;
-    }
-
-    println!("lzma_decode end return ret: {:?}", ret);
-
-    ret
 }
 
 #[inline]
@@ -1232,7 +1368,7 @@ fn lzma_decoder_reset(coder_ptr: &mut LzCoderType, opt: &LzmaOptionsType) {
     bittree_reset!(coder.rep_len_decoder.high, LEN_HIGH_BITS);
 
     coder.sequence = Sequence::IsMatch;
-    coder.probs = Box::new([Probability::default(); LITERAL_CODER_SIZE * LITERAL_CODERS_MAX]); // 使用Box::new，拥有数据所有权
+    coder.probs = AtomicPtr::new(ptr::null_mut()); // 使用Box::new，拥有数据所有权
     coder.symbol = 0;
     coder.limit = 0;
     coder.offset = 0;

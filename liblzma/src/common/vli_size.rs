@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 use crate::api::{LzmaVli, LZMA_VLI_BYTES_MAX, LZMA_VLI_MAX};
 
 /// 计算可变长度整数的字节大小
