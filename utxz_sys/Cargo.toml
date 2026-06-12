@@ -1,0 +1,11 @@
+[package]
+name = "utxz-sys"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "utxz_sys"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2.173"
