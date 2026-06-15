@@ -42,7 +42,6 @@ pub struct LzmaBlock {
     pub reserved_bool7: LzmaBool,
     pub reserved_bool8: LzmaBool,
 }
-#[allow(dead_code)]
 impl Default for LzmaBlock {
     fn default() -> Self {
         Self {
