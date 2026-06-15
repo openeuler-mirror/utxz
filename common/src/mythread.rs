@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use libc::{sigprocmask, sigset_t};
-use std::ptr;
+use libc::sigset_t;
+use utxz_sys::signal as sys_signal;
 
 #[derive(Default)]
 pub struct MyThreadCondTime {
@@ -16,17 +16,9 @@ pub struct MyThreadCondTime {
 }
 
 pub fn mythread_sigmask(how: i32, set: Option<&sigset_t>, oset: Option<&mut sigset_t>) {
-    // 调用 sigprocmask 来修改信号掩码
-    let ret = unsafe {
-        sigprocmask(
-            how,
-            set.map_or(ptr::null(), |s| s),
-            oset.map_or(ptr::null_mut(), |os| os),
-        )
-    };
-
-    // 检查返回值是否为 0 (表示操作成功)
-    assert!(ret == 0, "sigprocmask failed with error code: {}", ret);
+    // 通过 wrapper crate 集中承载 libc/FFI 的 unsafe
+    let ret = sys_signal::sigprocmask(how, set, oset);
+    assert!(ret.is_ok(), "sigprocmask failed: {:?}", ret.err());
 }
 
 pub fn get_tick_count() -> u32 {
