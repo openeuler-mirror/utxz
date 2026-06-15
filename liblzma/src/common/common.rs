@@ -77,7 +77,7 @@ pub enum Sequence {
 
 pub type LzmaCodeFunction = fn(
     coder: &mut CoderType,
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
@@ -111,7 +111,7 @@ pub enum CoderType {
     LzDecoder(LzmaDecoder),
     LzEncoder(LzmaEncoder),
     SimpleCoder(LzmaSimpleCoder),
-    // StreamEncoderMt(LzmaStreamEncoderMt<'a>),
+    MtStreamEncoder(super::stream_encoder_mt::MtStreamEncoder),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -479,7 +479,6 @@ pub fn lzma_strm_init(strm: Option<&mut LzmaStream>) -> LzmaRet {
 // }
 
 pub fn lzma_code(strm: &mut LzmaStream, action: LzmaAction) -> LzmaRet {
-    // Sanity checks
     let mut internal = strm.internal.borrow_mut();
     let internal = internal.as_mut().unwrap();
 
@@ -540,7 +539,9 @@ pub fn lzma_code(strm: &mut LzmaStream, action: LzmaAction) -> LzmaRet {
             }
         }
         Sequence::End => return LzmaRet::StreamEnd,
-        Sequence::Error => return LzmaRet::ProgError,
+        Sequence::Error => {
+            return LzmaRet::ProgError;
+        }
     }
 
     let mut in_pos = 0;
@@ -557,11 +558,10 @@ pub fn lzma_code(strm: &mut LzmaStream, action: LzmaAction) -> LzmaRet {
         if let Some(code) = next.code {
             ret = code(
                 &mut next.coder.as_mut().unwrap(),
-                &strm.next_in.to_vec(),
+                strm.next_in,
                 &mut in_pos,
                 strm.avail_in.get(),
                 &mut next_out[next_out_pos as usize..],
-                //&mut &next_out,
                 &mut out_pos,
                 strm.avail_out.get(),
                 action,
@@ -613,6 +613,14 @@ pub fn lzma_code(strm: &mut LzmaStream, action: LzmaAction) -> LzmaRet {
             if internal.sequence == Sequence::Finish {
                 internal.sequence = Sequence::Run;
             }
+
+            if let Some(next) = internal.next.as_mut() {
+                if let Some(CoderType::FileInfo(coder)) = next.coder.as_mut() {
+                    if let Some(seek_pos) = coder.external_seek_pos() {
+                        strm.seek_pos.set(seek_pos);
+                    }
+                }
+            }
             LzmaRet::SeekNeeded
         }
         LzmaRet::StreamEnd => {
@@ -636,7 +644,6 @@ pub fn lzma_code(strm: &mut LzmaStream, action: LzmaAction) -> LzmaRet {
         _ => {
             assert!(ret != LzmaRet::BufError);
             internal.sequence = Sequence::Error;
-            println!("88888888888");
             ret
         }
     }
