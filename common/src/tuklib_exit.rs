@@ -4,16 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(
-    dead_code,
-    mutable_transmutes,
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals,
-    unused_assignments,
-    unused_mut
-)]
-
 use crate::common::get_progname;
 use std::io::{self, stderr, stdout, Write};
 use std::process::exit;
