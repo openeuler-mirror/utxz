@@ -1,5 +1,4 @@
 [workspace.package]
-name = "utxz"
 version = "1.0.0"
 edition = "2021"
 
@@ -10,8 +9,15 @@ members = [
     "common", 
     "liblzma", 
     "lzmainfo", 
+    "utxz_sys",
     "utxz", 
     "xzdec",
 ]
+
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
 
 
