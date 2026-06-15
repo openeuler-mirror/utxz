@@ -29,22 +29,22 @@ pub enum LzmaRet {
     RetInternal1 = 13,
 }
 
-// #[derive(Debug)]
-// pub struct LzmaAllocator {
-//     pub alloc: Option<fn(opaque: *mut (), size: usize) -> *mut ()>,
-//     pub free: Option<fn(opaque: *mut (), ptr: *mut ())>,
-//     pub opaque: Box<()>,
-// }
+#[derive(Debug)]
+pub struct LzmaAllocator {
+    pub alloc: Option<fn(opaque: *mut (), size: usize) -> *mut ()>,
+    pub free: Option<fn(opaque: *mut (), ptr: *mut ())>,
+    pub opaque: Box<()>,
+}
 
-// impl Default for LzmaAllocator {
-//     fn default() -> Self {
-//         Self {
-//             alloc: None,
-//             free: None,
-//             opaque: Box::new(()),
-//         }
-//     }
-// }
+impl Default for LzmaAllocator {
+    fn default() -> Self {
+        Self {
+            alloc: None,
+            free: None,
+            opaque: Box::new(()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct LzmaStream<'a> {
