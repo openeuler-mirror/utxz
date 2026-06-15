@@ -174,14 +174,20 @@ pub fn lzma_check_finish(check: &mut LzmaCheckState, type_: LzmaCheck) {
     match type_ {
         LzmaCheck::Crc32 => {
             check.buffer.u32[0] = check.state.crc32;
+            check.buffer.u8[..4].copy_from_slice(&check.state.crc32.to_le_bytes());
         }
 
         LzmaCheck::Crc64 => {
             check.buffer.u64[0] = check.state.crc64;
+            check.buffer.u8[..8].copy_from_slice(&check.state.crc64.to_le_bytes());
         }
 
         LzmaCheck::Sha256 => {
             lzma_sha256_finish(check);
+            for i in 0..8 {
+                check.buffer.u8[i * 4..(i + 1) * 4]
+                    .copy_from_slice(&check.state.sha256.state[i].to_be_bytes());
+            }
         }
         _ => {}
     }
