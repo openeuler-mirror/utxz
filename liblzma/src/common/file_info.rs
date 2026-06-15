@@ -124,7 +124,7 @@ impl Default for LzmaFileInfoCoder {
 /// 这也保持 `coder.file_cur_pos` 与 `*in_pos` 同步。如果需要更多输入，则返回 `true`。
 fn fill_temp(
     coder: &mut LzmaFileInfoCoder,
-    in_data: &Vec<u8>,
+    in_data: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> bool {
@@ -256,7 +256,7 @@ fn hide_format_error(ret: LzmaRet) -> LzmaRet {
 fn decode_index(
     coder: &mut LzmaFileInfoCoder,
 
-    in_data: &Vec<u8>,
+    in_data: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     update_file_cur_pos: bool,
@@ -293,7 +293,7 @@ fn decode_index(
 
 fn file_info_decode(
     coder_ptr: &mut CoderType,
-    in_data: &Vec<u8>,
+    in_data: &[u8],
     in_pos: &mut usize,
     mut in_size: usize,
     _out: &mut [u8],
@@ -787,6 +787,12 @@ pub fn get_dest_index(strm: &LzmaStream) -> Option<Arc<Mutex<Arc<Mutex<LzmaIndex
         coder.dest_index.clone()
     } else {
         None
+    }
+}
+
+impl LzmaFileInfoCoder {
+    pub(crate) fn external_seek_pos(&self) -> Option<u64> {
+        self.external_seek_pos
     }
 }
 
