@@ -146,6 +146,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "nix",
+ "utxz-sys",
 ]
 
 [[package]]
@@ -391,6 +392,14 @@ dependencies = [
  "liblzma",
  "nix",
  "signal-hook",
+ "utxz-sys",
+]
+
+[[package]]
+name = "utxz-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
