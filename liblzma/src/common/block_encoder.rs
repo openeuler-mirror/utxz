@@ -83,7 +83,7 @@ enum Sequence {
 
 fn block_encode(
     coder_ptr: &mut CoderType, // 原 C 代码中的 void* 指针
-    input: &Vec<u8>,           // 输入缓冲区
+    input: &[u8],              // 输入缓冲区
     in_pos: &mut usize,        // 输入数据当前位置
     in_size: usize,            // 输入数据总大小
     output: &mut [u8],         // 输出缓冲区
@@ -103,7 +103,7 @@ fn block_encode(
         return LzmaRet::DataError;
     }
     // println!("==== coder  {:#?}", coder);
-    while (true) {
+    loop {
         match coder.sequence {
             Sequence::Code => {
                 let in_start = *in_pos;
