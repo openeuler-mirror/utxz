@@ -72,7 +72,7 @@ fn is_size_valid(size: u64, reference: u64) -> bool {
 fn block_decode(
     coder_ptr: &mut CoderType,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
@@ -127,10 +127,12 @@ fn block_decode(
                 coder.uncompressed_size += out_used as u64;
 
                 if ret == LzmaRet::Ok {
-                    let comp_done =
-                        coder.compressed_size == coder.block.as_mut().unwrap().compressed_size;
-                    let uncomp_done =
-                        coder.uncompressed_size == coder.block.as_mut().unwrap().uncompressed_size;
+                    let (declared_compressed_size, declared_uncompressed_size) = {
+                        let block = coder.block.as_mut().unwrap();
+                        (block.compressed_size, block.uncompressed_size)
+                    };
+                    let comp_done = coder.compressed_size == declared_compressed_size;
+                    let uncomp_done = coder.uncompressed_size == declared_uncompressed_size;
 
                     if comp_done && uncomp_done {
                         return LzmaRet::DataError;
@@ -160,13 +162,13 @@ fn block_decode(
                 }
 
                 // 验证最终的压缩/未压缩大小
-                if !is_size_valid(
-                    coder.compressed_size,
-                    coder.block.as_mut().unwrap().compressed_size,
-                ) || !is_size_valid(
-                    coder.uncompressed_size,
-                    coder.block.as_mut().unwrap().uncompressed_size,
-                ) {
+                let (declared_compressed_size, declared_uncompressed_size) = {
+                    let block = coder.block.as_mut().unwrap();
+                    (block.compressed_size, block.uncompressed_size)
+                };
+                if !is_size_valid(coder.compressed_size, declared_compressed_size)
+                    || !is_size_valid(coder.uncompressed_size, declared_uncompressed_size)
+                {
                     return LzmaRet::DataError;
                 }
 
@@ -212,14 +214,17 @@ fn block_decode(
             // 处理 Check 阶段
             Sequence::Check => {
                 let check_size = lzma_check_size(coder.block.as_mut().unwrap().check.clone());
-                lzma_bufcpy(
-                    input,
-                    in_pos,
-                    in_size,
-                    &mut coder.block.as_mut().unwrap().raw_check.to_vec(),
-                    &mut coder.check_pos,
-                    check_size as usize,
-                );
+                {
+                    let block = coder.block.as_mut().unwrap();
+                    lzma_bufcpy(
+                        input,
+                        in_pos,
+                        in_size,
+                        &mut block.raw_check[..check_size as usize],
+                        &mut coder.check_pos,
+                        check_size as usize,
+                    );
+                }
 
                 if coder.check_pos < check_size as usize {
                     return LzmaRet::Ok;
@@ -346,7 +351,7 @@ pub fn lzma_block_decoder<'a>(strm: &mut LzmaStream<'a>, block: &'a mut LzmaBloc
         if let Some(ref mut next) = internal.next {
             let ret: LzmaRet = lzma_block_decoder_init(next, block);
             if ret != LzmaRet::Ok {
-                drop(internal);
+                let _ = internal;
                 // lzma_end(Some(strm));
                 return ret;
             }
@@ -357,12 +362,12 @@ pub fn lzma_block_decoder<'a>(strm: &mut LzmaStream<'a>, block: &'a mut LzmaBloc
 
             LzmaRet::Ok
         } else {
-            drop(internal);
+            let _ = internal;
             // lzma_end(Some(strm));
             LzmaRet::ProgError
         }
     } else {
-        drop(internal);
+        let _ = internal;
         // lzma_end(Some(strm));
         LzmaRet::ProgError
     }
