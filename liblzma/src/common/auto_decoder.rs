@@ -40,7 +40,7 @@ enum Sequence {
 fn auto_decode(
     coder_ptr: &mut CoderType,
 
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
