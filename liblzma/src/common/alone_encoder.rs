@@ -48,7 +48,7 @@ enum Sequence {
 fn alone_encode(
     coder_ptr: &mut CoderType,
 
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
@@ -196,7 +196,7 @@ pub fn lzma_alone_encoder(strm: &mut LzmaStream, options: &LzmaOptionsLzma) -> L
         if let Some(ref mut next) = internal.next {
             let ret_0: LzmaRet = alone_encoder_init(next, options);
             if ret_0 != LzmaRet::Ok {
-                drop(internal);
+                let _ = internal;
                 // lzma_end(Some(strm));
                 return ret_0;
             }
@@ -206,12 +206,12 @@ pub fn lzma_alone_encoder(strm: &mut LzmaStream, options: &LzmaOptionsLzma) -> L
 
             LzmaRet::Ok
         } else {
-            drop(internal);
+            let _ = internal;
             // lzma_end(Some(strm));
             LzmaRet::ProgError
         }
     } else {
-        drop(internal);
+        let _ = internal;
         // lzma_end(Some(strm));
         LzmaRet::ProgError
     }
