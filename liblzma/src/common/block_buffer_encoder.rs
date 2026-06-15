@@ -8,8 +8,8 @@ use common::my_min;
 
 use crate::{
     api::{
-        LzmaAction, LzmaAllocator, LzmaBlock, LzmaFilter, LzmaOptionsLzma, LzmaRet,
-        LZMA_CHECK_ID_MAX, LZMA_CHECK_SIZE_MAX, LZMA_DICT_SIZE_MIN, LZMA_FILTER_LZMA2,
+        LzmaAction, LzmaAllocator, LzmaBlock, LzmaFilter, LzmaOptionsLzma, LzmaOptionsType,
+        LzmaRet, LZMA_CHECK_ID_MAX, LZMA_CHECK_SIZE_MAX, LZMA_DICT_SIZE_MIN, LZMA_FILTER_LZMA2,
         LZMA_VLI_BYTES_MAX, LZMA_VLI_UNKNOWN,
     },
     check::{
@@ -74,7 +74,7 @@ pub fn lzma_block_buffer_bound(uncompressed_size: usize) -> usize {
 
 fn block_encode_uncompressed(
     block: &mut LzmaBlock,
-    input: &Vec<u8>,
+    input: &[u8],
     insize: usize,
     output: &mut Vec<u8>,
     out_pos: &mut usize,
@@ -90,7 +90,7 @@ fn block_encode_uncompressed(
     let mut filters: [LzmaFilter; 2] = [
         LzmaFilter {
             id: LZMA_FILTER_LZMA2,
-            options: None,
+            options: Some(LzmaOptionsType::LzmaOptionsLzma(lzma2)),
         },
         LzmaFilter {
             id: LZMA_VLI_UNKNOWN,
@@ -102,24 +102,37 @@ fn block_encode_uncompressed(
     let filters_orig = std::mem::replace(&mut block.filters, filters.to_vec());
     block.filters = filters.to_vec();
 
+    // Save and clear size fields so they're omitted from the block header
+    let saved_compressed = block.compressed_size;
+    let saved_uncompressed = block.uncompressed_size;
+    block.compressed_size = LZMA_VLI_UNKNOWN;
+    block.uncompressed_size = LZMA_VLI_UNKNOWN;
+
     // 编码块头部
     if lzma_block_header_size(block) != LzmaRet::Ok {
+        block.compressed_size = saved_compressed;
+        block.uncompressed_size = saved_uncompressed;
         block.filters = filters_orig.to_vec();
         return LzmaRet::ProgError;
     }
 
-    // 检查输出空间
-    assert_eq!(block.compressed_size, lzma2_bound(input.len() as u64));
-    if output.len() - *out_pos < block.header_size as usize + block.compressed_size as usize {
+    let data_bound = lzma2_bound(input.len() as u64) as usize;
+    if output.len() - *out_pos < block.header_size as usize + data_bound {
+        block.compressed_size = saved_compressed;
+        block.uncompressed_size = saved_uncompressed;
         block.filters = filters_orig.to_vec();
         return LzmaRet::BufError;
     }
 
-    if lzma_block_header_encode(block, &mut output[*out_pos..].to_vec()) != LzmaRet::Ok {
+    if lzma_block_header_encode(block, &mut output[*out_pos..]) != LzmaRet::Ok {
+        block.compressed_size = saved_compressed;
+        block.uncompressed_size = saved_uncompressed;
         block.filters = filters_orig.to_vec();
         return LzmaRet::ProgError;
     }
 
+    block.compressed_size = saved_compressed;
+    block.uncompressed_size = saved_uncompressed;
     block.filters = filters_orig.to_vec();
     *out_pos += block.header_size as usize;
 
@@ -159,11 +172,12 @@ fn block_encode_uncompressed(
 fn block_encode_normal(
     block: &mut LzmaBlock,
     allocator: &LzmaAllocator,
-    input: &Vec<u8>,
+    input: &[u8],
     insize: usize,
     output: &mut Vec<u8>,
     out_pos: &mut usize,
     out_size: usize,
+    compressed_size_bound: u64,
 ) -> LzmaRet {
     // 获取块头部大小
     let ret: LzmaRet = lzma_block_header_size(block);
@@ -181,20 +195,19 @@ fn block_encode_normal(
 
     // 限制 out_size，以便在输出超过未压缩块大小时停止编码
     let mut out_size = output.len();
-    if out_size - *out_pos > block.compressed_size as usize {
-        out_size = *out_pos + block.compressed_size as usize;
+    if out_size - *out_pos > compressed_size_bound as usize {
+        out_size = *out_pos + compressed_size_bound as usize;
     }
 
     // 初始化原始编码器
     let mut raw_encoder = &mut LzmaNextCoder::default();
-    let mut ret = lzma_raw_encoder_init(&mut raw_encoder, allocator, &block.filters);
+    let mut ret = lzma_raw_encoder_init(&mut raw_encoder, &block.filters);
 
     if ret == LzmaRet::Ok {
         let mut in_pos: usize = 0;
         if let Some(cpde) = raw_encoder.code {
             ret = cpde(
                 &mut raw_encoder.coder.as_mut().unwrap(),
-                allocator,
                 input,
                 &mut in_pos,
                 insize,
@@ -207,22 +220,36 @@ fn block_encode_normal(
     }
 
     // 即使 lzma_raw_encoder_init() 失败，也需要运行此代码
-    lzma_next_end(raw_encoder, allocator);
+    lzma_next_end(raw_encoder);
 
     if ret == LzmaRet::StreamEnd {
-        // 压缩成功，写入块头部
-        block.compressed_size = (*out_pos - (out_start + block.header_size as usize)) as u64;
-        ret = lzma_block_header_encode(block, &mut output[out_start..].to_vec());
-        if ret == LzmaRet::Ok {
-            ret = LzmaRet::ProgError;
+        // Save compressed end position before padding
+        let compressed_end = *out_pos;
+        // Pad compressed data to 4-byte boundary
+        while *out_pos % 4 != 0 {
+            output[*out_pos] = 0x00;
+            *out_pos += 1;
         }
+
+        // Set compressed_size for Index: excludes padding and check
+        block.compressed_size = (compressed_end - out_start - block.header_size as usize) as u64;
+
+        // Write block header. We must keep compressed_size=LZMA_VLI_UNKNOWN during
+        // encoding so the header omits size fields (Index provides them).
+        let cs_for_header = block.compressed_size;
+        block.compressed_size = LZMA_VLI_UNKNOWN;
+        let header_ret = lzma_block_header_encode(block, &mut output[out_start..]);
+        if header_ret != LzmaRet::Ok {
+            ret = header_ret;
+        }
+        block.compressed_size = cs_for_header;
     } else if ret == LzmaRet::Ok {
         // 输出缓冲区已满
         ret = LzmaRet::BufError;
     }
 
     // 如果出现错误，重置 *out_pos
-    if ret != LzmaRet::Ok {
+    if ret != LzmaRet::Ok && ret != LzmaRet::StreamEnd {
         *out_pos = out_start;
     }
 
@@ -232,7 +259,7 @@ fn block_encode_normal(
 fn block_buffer_encode(
     block: &mut LzmaBlock,
     allocator: &LzmaAllocator,
-    input: &Vec<u8>,
+    input: &[u8],
     in_size: usize,
     output: &mut Vec<u8>,
     out_pos: &mut usize,
@@ -285,10 +312,15 @@ fn block_buffer_encode(
 
     out_size -= check_size as usize;
 
-    // 初始化 uncompressed_size 并计算 compressed_size 的最坏情况
+    // 初始化 uncompressed_size 用于内部 bound 计算
     block.uncompressed_size = in_size as u64;
     block.compressed_size = lzma2_bound(in_size as u64);
-    if block.compressed_size == 0 {
+    // Use LZMA_VLI_UNKNOWN for header encoding so both size fields are omitted
+    // from the block header (the Index provides block boundaries)
+    let compressed_size_bound = block.compressed_size;
+    block.compressed_size = LZMA_VLI_UNKNOWN;
+    block.uncompressed_size = LZMA_VLI_UNKNOWN;
+    if compressed_size_bound == 0 {
         return LzmaRet::DataError;
     }
 
@@ -296,49 +328,48 @@ fn block_buffer_encode(
     let mut ret = LzmaRet::BufError;
     if try_to_compress {
         ret = block_encode_normal(
-            &mut block.clone(),
+            block,
             allocator,
             input,
             in_size,
             output,
             out_pos,
             out_size,
+            compressed_size_bound,
         );
     }
 
-    if ret != LzmaRet::Ok {
+    if ret != LzmaRet::Ok && ret != LzmaRet::StreamEnd {
         if ret != LzmaRet::BufError {
             return ret;
         }
 
-        let r = block_encode_uncompressed(
-            &mut block.clone(),
-            input,
-            in_size,
-            output,
-            out_pos,
-            out_size,
-        );
+        let r = block_encode_uncompressed(block, input, in_size, output, out_pos, out_size);
         if r != LzmaRet::Ok {
             return r;
+        }
+
+        if block.compressed_size == LZMA_VLI_UNKNOWN {
+            block.compressed_size = (*out_pos - block.header_size as usize) as u64;
         }
     }
 
     assert!(*out_pos <= out_size);
 
-    // 块填充
-    // 确保压缩大小是4的倍数
-    for i in block.compressed_size..((block.compressed_size + 3) & !3) {
-        assert!(*out_pos < out_size);
+    // Ensure 4-byte alignment (block_encode_normal pads, but block_encode_uncompressed may not)
+    while *out_pos % 4 != 0 {
+        if *out_pos >= out_size {
+            return LzmaRet::BufError;
+        }
         output[*out_pos] = 0x00;
         *out_pos += 1;
     }
 
-    // 处理校验字段
+    // Handle check
     if check_size > 0 {
         let mut check = LzmaCheckState::default();
         lzma_check_init(&mut check, block.check.clone());
-        lzma_check_update(&mut check, block.check.clone(), input);
+        lzma_check_update(&mut check, block.check.clone(), input, input.len());
         lzma_check_finish(&mut check, block.check.clone());
 
         block.raw_check[..check_size as usize]
