@@ -48,7 +48,7 @@ pub struct LzmaAloneDecoder {
 fn alone_decode(
     coder_ptr: &mut CoderType,
 
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
@@ -259,7 +259,7 @@ pub fn lzma_alone_decoder(strm: &mut LzmaStream, memlimit: u64) -> LzmaRet {
         if let Some(ref mut next) = internal.next {
             let ret_0: LzmaRet = lzma_alone_decoder_init(next, memlimit, false);
             if ret_0 != LzmaRet::Ok {
-                drop(internal);
+                let _ = internal;
                 // lzma_end(Some(strm));
                 return ret_0;
             }
@@ -269,12 +269,12 @@ pub fn lzma_alone_decoder(strm: &mut LzmaStream, memlimit: u64) -> LzmaRet {
 
             LzmaRet::Ok
         } else {
-            drop(internal);
+            let _ = internal;
             // lzma_end(Some(strm));
             LzmaRet::ProgError
         }
     } else {
-        drop(internal);
+        let _ = internal;
         // lzma_end(Some(strm));
         LzmaRet::ProgError
     }
