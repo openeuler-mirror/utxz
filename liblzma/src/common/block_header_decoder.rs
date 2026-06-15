@@ -58,9 +58,6 @@ pub fn lzma_block_header_decode(block: &mut LzmaBlock, input: &mut [u8]) -> Lzma
     let crc = lzma_crc32(&input[0..in_size as usize], in_size as usize, 0);
     let crc_input = read32le(&input[in_size as usize..]);
     if crc != crc_input {
-        println!("crc: {:?}", crc);
-        println!("crc_input: {:?}", crc_input);
-        println!("input: {:?}", &input[..in_size as usize]);
         return LzmaRet::DataError;
     }
 
