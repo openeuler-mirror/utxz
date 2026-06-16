@@ -139,7 +139,7 @@ fn stream_decoder_reset(coder: &mut LzmaStreamDecoder) -> LzmaRet {
 
 fn stream_decode(
     coder_ptr: &mut CoderType,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
