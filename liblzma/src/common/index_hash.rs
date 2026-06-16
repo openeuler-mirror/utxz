@@ -191,7 +191,7 @@ fn check_buffers_equal(buf1: &[u8], buf2: &[u8], size: usize) -> bool {
 }
 pub fn lzma_index_hash_decode(
     index_hash: &mut LzmaIndexHash,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
