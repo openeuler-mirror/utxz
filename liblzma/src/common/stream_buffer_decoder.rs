@@ -12,7 +12,7 @@ pub fn lzma_stream_buffer_decode(
     memlimit: &mut u64,
     flags: u32,
     allocator: &LzmaAllocator,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut Vec<u8>,
