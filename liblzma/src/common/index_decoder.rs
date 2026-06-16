@@ -98,7 +98,7 @@ pub enum Sequence {
 
 fn index_decode(
     coder_ptr: &mut CoderType,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
@@ -423,7 +423,7 @@ pub fn lzma_index_decoder(
 pub fn lzma_index_buffer_decode(
     mut i: Option<Arc<Mutex<Arc<Mutex<LzmaIndex>>>>>,
     memlimit: &mut u64,
-    in_data: &Vec<u8>,
+    in_data: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
