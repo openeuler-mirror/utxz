@@ -64,7 +64,7 @@ impl Clone for LzmaIndexEncoder {
 fn index_encode(
     coder_ptr: &mut CoderType,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
