@@ -10,8 +10,6 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use libc::{group, memcpy, tm};
-
 use crate::{
     api::{
         Internal, LzmaIndexIter, LzmaIndexIterMode, LzmaRet, LzmaStreamFlags, LzmaVli,
