@@ -117,7 +117,7 @@ impl Default for LzmaLzipCoder {
 pub fn lzip_decode(
     coder_ptr: &mut CoderType,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
