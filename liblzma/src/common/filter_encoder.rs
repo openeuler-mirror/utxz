@@ -96,6 +96,15 @@ impl Default for LzmaFilterEncoder {
     }
 }
 
+/// Wrapper to compute LZMA2 block size for multi-threaded encoding.
+/// Block size is max(dict_size * 3, 1 MiB) to keep compression ratio reasonable.
+fn lzma2_block_size(options: &LzmaOptionsType) -> u64 {
+    match options {
+        LzmaOptionsType::LzmaOptionsLzma(opt) => std::cmp::max((opt.dict_size as u64) * 3, 1 << 20),
+        _ => u64::MAX,
+    }
+}
+
 static ENCODERS: &[LzmaFilterEncoder] = &[
     LzmaFilterEncoder {
         id: LZMA_FILTER_LZMA1,
@@ -119,7 +128,7 @@ static ENCODERS: &[LzmaFilterEncoder] = &[
         id: LZMA_FILTER_LZMA2,
         init: Some(lzma_lzma2_encoder_init),
         memusage: Some(lzma_lzma2_encoder_memusage),
-        block_size: Some(lzma_lzma2_encoder_memusage), // Adjust if block_size differs
+        block_size: Some(lzma2_block_size),
         props_size_get: None,
         props_size_fixed: 1,
         props_encode: Some(lzma_lzma2_props_encode),
