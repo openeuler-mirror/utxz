@@ -49,7 +49,7 @@ pub struct LzmaMicrolzmaDecoder {
 fn microlzma_decode(
     coder_ptr: &mut CoderType,
 
-    in_data: &Vec<u8>,
+    in_data: &[u8],
     in_pos: &mut usize,
     mut in_size: usize,
     out_data: &mut [u8],
