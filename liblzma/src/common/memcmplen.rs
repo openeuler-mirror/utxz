@@ -13,20 +13,47 @@ pub fn lzma_memcmplen(buf1: &[u8], buf2: &[u8], mut len: u32, limit: u32) -> u32
     assert!(limit <= u32::MAX / 2);
 
     while len < limit {
-        let buf1_tem = &buf1[len as usize..(len + 8) as usize]; // 获取 buf1 的切片
-        let buf2_tem = &buf2[len as usize..(len + 8) as usize]; // 获取 buf2 的切片
+        let buf1_tem = &buf1[len as usize..(len + 8) as usize];
+        let buf2_tem = &buf2[len as usize..(len + 8) as usize];
         let a = read64ne(buf1_tem);
         let b = read64ne(buf2_tem);
-        // let x = read64ne(buf1_tem) - read64ne(buf2_tem); // 传递切片
         let x = a.wrapping_sub(b);
-        // println!("x = {}", x);
         if x != 0 {
             len += x.trailing_zeros() >> 3;
-            // println!("888888 len = {}", len);
             return my_min(len, limit);
         }
         len += 8;
     }
 
+    limit
+}
+
+/// Unsafe fast memcmplen using raw pointer arithmetic.
+/// Eliminates slice bounds checks in the hot match-finding loop.
+///
+/// # Safety
+/// - `buf1` and `buf2` must point to valid buffers with at least `limit + LZMA_MEMCMPLEN_EXTRA` bytes available.
+/// - `len` must be <= `limit`.
+/// - `limit` must be <= `u32::MAX / 2`.
+pub unsafe fn lzma_memcmplen_unchecked(
+    buf1: *const u8,
+    buf2: *const u8,
+    mut len: u32,
+    limit: u32,
+) -> u32 {
+    debug_assert!(len <= limit);
+    debug_assert!(limit <= u32::MAX / 2);
+
+    while len < limit {
+        let a = (buf1.add(len as usize) as *const u64).read_unaligned();
+        let b = (buf2.add(len as usize) as *const u64).read_unaligned();
+        let x = a ^ b;
+        if x != 0 {
+            let inc = x.trailing_zeros() >> 3;
+            let new_len = len + inc;
+            return if new_len < limit { new_len } else { limit };
+        }
+        len += 8;
+    }
     limit
 }
