@@ -20,6 +20,7 @@ fn stream_flags_encode(options: &LzmaStreamFlags, out: &mut [u8]) -> bool {
         return true;
     }
 
+    // Byte 0: reserved bits, Byte 1: check type in bits 0-3, reserved bits 4-7 are 0
     out[0] = 0x00;
     out[1] = options.check.clone() as u8;
 
