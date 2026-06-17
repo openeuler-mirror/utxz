@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use std::ptr;
+
 use common::my_min;
 
 use crate::{
@@ -64,7 +66,7 @@ pub struct LzmaLzDecoder {
         fn(
             coder: &mut LzCoderType,
             dict: &mut LzmaDict,
-            in_: &Vec<u8>,
+            in_: &[u8],
             in_pos: &mut usize,
             in_size: usize,
         ) -> LzmaRet,
@@ -143,6 +145,24 @@ pub fn dict_get(dict: &LzmaDict, distance: u32) -> u8 {
     dict.buf[count]
 }
 
+/// Unsafe variant of dict_get without Vec bounds checking.
+/// Caller must ensure the computed index is within buf bounds
+/// (i.e., the distance is valid and the arithmetic doesn't overflow).
+#[inline]
+pub unsafe fn dict_get_unchecked(dict: &LzmaDict, distance: u32) -> u8 {
+    let temp = if (distance as usize) < dict.pos {
+        0
+    } else {
+        dict.size
+    };
+    let count = dict
+        .pos
+        .wrapping_sub(distance as usize)
+        .wrapping_sub(1)
+        .wrapping_add(temp);
+    *dict.buf.as_ptr().add(count)
+}
+
 #[inline]
 pub fn dict_is_empty(dict: &LzmaDict) -> bool {
     dict.full == 0
@@ -162,17 +182,41 @@ pub fn dict_repeat(dict: &mut LzmaDict, distance: usize, len: &mut usize) -> boo
 
     // 根据不同情况处理数据复制
     if distance < left {
-        // 源和目标区域重叠，逐字节复制
-        while left > 0 {
-            dict.buf[dict.pos] = dict_get(dict, distance as u32);
-            dict.pos += 1;
-            left -= 1;
+        if distance < dict.pos {
+            // 源和目标区域重叠，但未发生环绕。
+            // 使用 unsafe ptr::copy 消除边界检查。
+            let src = dict.buf.as_ptr();
+            let dst = dict.buf.as_mut_ptr();
+            let start = dict.pos - distance - 1;
+            // 前 distance 个字节：源 (start..start+distance) 与目标 (dict.pos..dict.pos+distance) 不重叠
+            unsafe {
+                ptr::copy_nonoverlapping(src.add(start), dst.add(dict.pos), distance);
+            }
+            dict.pos += distance;
+            left -= distance;
+            // 剩余部分可能重叠，使用 ptr::copy (memmove 语义)
+            unsafe {
+                ptr::copy(src.add(start), dst.add(dict.pos), left);
+            }
+            dict.pos += left;
+        } else {
+            // 环绕情况下的重叠复制，逐字节复制
+            while left > 0 {
+                dict.buf[dict.pos] = dict_get(dict, distance as u32);
+                dict.pos += 1;
+                left -= 1;
+            }
         }
     } else if distance < dict.pos {
-        // 最简单和最快的情况，直接复制
+        // 不重叠，直接块复制
         let start = dict.pos - distance - 1;
-        let end = start + left;
-        dict.buf.copy_within(start..end, dict.pos);
+        unsafe {
+            ptr::copy_nonoverlapping(
+                dict.buf.as_ptr().add(start),
+                dict.buf.as_mut_ptr().add(dict.pos),
+                left,
+            );
+        }
         dict.pos += left;
     } else {
         // 字典需要"环绕"，可能需要两次复制
@@ -226,10 +270,21 @@ pub fn dict_put(dict: &mut LzmaDict, byte: u8) -> bool {
     false
 }
 
+/// Unsafe variant of dict_put without Vec bounds checking.
+/// Caller must ensure dict.pos < dict.limit (dictionary is not full).
+#[inline]
+pub unsafe fn dict_put_unchecked(dict: &mut LzmaDict, byte: u8) {
+    *dict.buf.as_mut_ptr().add(dict.pos) = byte;
+    dict.pos += 1;
+    if dict.pos > dict.full {
+        dict.full = dict.pos;
+    }
+}
+
 #[inline]
 pub fn dict_write(
     dict: &mut LzmaDict,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     left: &mut usize,
@@ -278,7 +333,7 @@ pub fn lz_decoder_reset(coder: &mut LzmaDecoder) {
 
 pub fn decode_buffer(
     coder: &mut LzmaDecoder,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
@@ -316,8 +371,13 @@ pub fn decode_buffer(
         assert!(copy_size <= out_size - *out_pos);
 
         if copy_size > 0 {
-            output[*out_pos..*out_pos + copy_size]
-                .copy_from_slice(&coder.dict.buf[dict_start..dict_start + copy_size]);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    coder.dict.buf.as_ptr().add(dict_start),
+                    output.as_mut_ptr().add(*out_pos),
+                    copy_size,
+                );
+            }
         }
 
         *out_pos += copy_size;
@@ -342,7 +402,7 @@ pub fn decode_buffer(
 pub fn lz_decode(
     coder_ptr: &mut CoderType,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
@@ -373,7 +433,7 @@ pub fn lz_decode(
                     input,
                     in_pos,
                     in_size,
-                    &mut coder.temp.buffer.to_vec(),
+                    &mut coder.temp.buffer,
                     &mut coder.temp.size,
                     LZMA_BUFFER_SIZE,
                     action.clone(),
@@ -402,9 +462,11 @@ pub fn lz_decode(
         // 使用临时变量避免重复借用
         let mut temp_pos = coder.temp.pos;
         let temp_size = coder.temp.size;
+        // SAFETY: decode_buffer only accesses coder.dict and coder.lz, not coder.temp.buffer
+        let temp_buf: *mut [u8; LZMA_BUFFER_SIZE] = &mut coder.temp.buffer;
         let ret = decode_buffer(
             coder,
-            &mut coder.temp.buffer.to_vec(),
+            unsafe { &mut *temp_buf },
             &mut temp_pos, // 使用临时变量
             temp_size,     // 使用临时变量
             output,
