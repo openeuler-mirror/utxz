@@ -5,7 +5,6 @@
  */
 
 use common::my_min;
-use libc::memset;
 
 use crate::{
     api::{
@@ -255,7 +254,7 @@ fn move_window(mf: &mut LzmaMf) {
 
 fn fill_window(
     coder: &mut LzmaEncoder,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     action: LzmaAction,
@@ -330,7 +329,7 @@ fn fill_window(
 
 fn lz_encode(
     coder_ptr: &mut CoderType,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
