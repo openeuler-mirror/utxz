@@ -55,7 +55,7 @@ fn get_literal_price(
             let match_bit = match_byte & offset;
             let subcoder_index = offset + match_bit + (symbol >> 8);
             let bit = (symbol >> 7) & 1;
-            let prob = *subcoder[subcoder_index as usize].lock().unwrap();
+            let prob = subcoder[subcoder_index as usize];
             price += rc_bit_price(prob, bit);
 
             symbol <<= 1;
@@ -73,12 +73,8 @@ fn get_len_price(lencoder: &LzmaLengthEncoder, len: u32, pos_state: u32) -> u32 
 
 /// 获取短期回退价格
 fn get_short_rep_price(coder: &LzmaLzma1Encoder, state: u32, pos_state: u32) -> u32 {
-    rc_bit_0_price(*coder.is_rep0[state as usize].lock().unwrap())
-        + rc_bit_0_price(
-            *coder.is_rep0_long[state as usize][pos_state as usize]
-                .lock()
-                .unwrap(),
-        )
+    rc_bit_0_price(coder.is_rep0[state as usize])
+        + rc_bit_0_price(coder.is_rep0_long[state as usize][pos_state as usize])
 }
 
 /// 获取纯回退价格
@@ -86,23 +82,16 @@ fn get_pure_rep_price(coder: &LzmaLzma1Encoder, rep_index: u32, state: u32, pos_
     let mut price: u32;
 
     if rep_index == 0 {
-        price = rc_bit_0_price(*coder.is_rep0[state as usize].lock().unwrap());
-        price += rc_bit_1_price(
-            *coder.is_rep0_long[state as usize][pos_state as usize]
-                .lock()
-                .unwrap(),
-        );
+        price = rc_bit_0_price(coder.is_rep0[state as usize]);
+        price += rc_bit_1_price(coder.is_rep0_long[state as usize][pos_state as usize]);
     } else {
-        price = rc_bit_1_price(*coder.is_rep0[state as usize].lock().unwrap());
+        price = rc_bit_1_price(coder.is_rep0[state as usize]);
 
         if rep_index == 1 {
-            price += rc_bit_0_price(*coder.is_rep1[state as usize].lock().unwrap());
+            price += rc_bit_0_price(coder.is_rep1[state as usize]);
         } else {
-            price += rc_bit_1_price(*coder.is_rep1[state as usize].lock().unwrap());
-            price += rc_bit_price(
-                *coder.is_rep2[state as usize].lock().unwrap(),
-                rep_index - 2,
-            );
+            price += rc_bit_1_price(coder.is_rep1[state as usize]);
+            price += rc_bit_price(coder.is_rep2[state as usize], rep_index - 2);
         }
     }
 
@@ -360,29 +349,21 @@ fn helper1(
     let pos_state = position & coder.pos_mask;
 
     // 计算字面值价格
-    coder.opts[1].price = rc_bit_0_price(
-        *coder.is_match[coder.state as usize][pos_state as usize]
-            .lock()
-            .unwrap(),
-    ) + get_literal_price(
-        coder,
-        position,
-        mf.buffer[mf.mf_ptr(1) - 1] as u32,
-        !is_literal_state(coder.state),
-        match_byte as u32,
-        current_byte as u32,
-    );
+    coder.opts[1].price = rc_bit_0_price(coder.is_match[coder.state as usize][pos_state as usize])
+        + get_literal_price(
+            coder,
+            position,
+            mf.buffer[mf.mf_ptr(1) - 1] as u32,
+            !is_literal_state(coder.state),
+            match_byte as u32,
+            current_byte as u32,
+        );
 
     make_literal(&mut coder.opts[1]);
 
     // 计算匹配价格和重复匹配价格
-    let match_price = rc_bit_1_price(
-        *coder.is_match[coder.state as usize][pos_state as usize]
-            .lock()
-            .unwrap(),
-    );
-    let rep_match_price =
-        match_price + rc_bit_1_price(*coder.is_rep[coder.state as usize].lock().unwrap());
+    let match_price = rc_bit_1_price(coder.is_match[coder.state as usize][pos_state as usize]);
+    let rep_match_price = match_price + rc_bit_1_price(coder.is_rep[coder.state as usize]);
 
     // 如果匹配字节等于当前字节，计算短重复价格并更新
     if match_byte == current_byte {
@@ -442,8 +423,7 @@ fn helper1(
     }
 
     // 计算正常匹配价格
-    let normal_match_price =
-        match_price + rc_bit_0_price(*coder.is_rep[coder.state as usize].lock().unwrap());
+    let normal_match_price = match_price + rc_bit_0_price(coder.is_rep[coder.state as usize]);
 
     len = if rep_lens[0] >= 2 { rep_lens[0] + 1 } else { 2 };
     if len <= len_main {
@@ -567,11 +547,7 @@ fn helper2(
     let pos_state = position & coder.pos_mask;
 
     let cur_and_1_price = cur_price
-        + rc_bit_0_price(
-            *coder.is_match[state as usize][pos_state as usize]
-                .lock()
-                .unwrap(),
-        )
+        + rc_bit_0_price(coder.is_match[state as usize][pos_state as usize])
         + get_literal_price(
             coder,
             position,
@@ -590,14 +566,9 @@ fn helper2(
         next_is_literal = true;
     }
 
-    let match_price = cur_price
-        + rc_bit_1_price(
-            *coder.is_match[state as usize][pos_state as usize]
-                .lock()
-                .unwrap(),
-        );
-    let rep_match_price =
-        match_price + rc_bit_1_price(*coder.is_rep[state as usize].lock().unwrap());
+    let match_price =
+        cur_price + rc_bit_1_price(coder.is_match[state as usize][pos_state as usize]);
+    let rep_match_price = match_price + rc_bit_1_price(coder.is_rep[state as usize]);
 
     if match_byte == current_byte
         && !(coder.opts[(cur + 1) as usize].pos_prev < cur
@@ -631,12 +602,8 @@ fn helper2(
 
             let pos_state_next = (position + 1) & coder.pos_mask;
             let next_rep_match_price = cur_and_1_price
-                + rc_bit_1_price(
-                    *coder.is_match[state_2 as usize][pos_state_next as usize]
-                        .lock()
-                        .unwrap(),
-                )
-                + rc_bit_1_price(*coder.is_rep[state_2 as usize].lock().unwrap());
+                + rc_bit_1_price(coder.is_match[state_2 as usize][pos_state_next as usize])
+                + rc_bit_1_price(coder.is_rep[state_2 as usize]);
 
             let offset = cur + 1 + len_test;
 
@@ -715,11 +682,7 @@ fn helper2(
 
             let cur_and_len_literal_price = price
                 + get_len_price(&coder.rep_len_encoder, len_test, pos_state)
-                + rc_bit_0_price(
-                    *coder.is_match[state_2 as usize][pos_state_next as usize]
-                        .lock()
-                        .unwrap(),
-                )
+                + rc_bit_0_price(coder.is_match[state_2 as usize][pos_state_next as usize])
                 + get_literal_price(
                     coder,
                     position + len_test,
@@ -734,12 +697,8 @@ fn helper2(
             pos_state_next = (position + len_test + 1) & coder.pos_mask;
 
             let next_rep_match_price = cur_and_len_literal_price
-                + rc_bit_1_price(
-                    *coder.is_match[state_2 as usize][pos_state_next as usize]
-                        .lock()
-                        .unwrap(),
-                )
-                + rc_bit_1_price(*coder.is_rep[state_2 as usize].lock().unwrap());
+                + rc_bit_1_price(coder.is_match[state_2 as usize][pos_state_next as usize])
+                + rc_bit_1_price(coder.is_rep[state_2 as usize]);
 
             let offset = cur + len_test + 1 + len_test_2;
 
@@ -776,8 +735,7 @@ fn helper2(
     }
 
     if new_len >= start_len {
-        let normal_match_price =
-            match_price + rc_bit_0_price(*coder.is_rep[state as usize].lock().unwrap());
+        let normal_match_price = match_price + rc_bit_0_price(coder.is_rep[state as usize]);
 
         while len_end < cur + new_len {
             coder.opts[(len_end + 1) as usize].price = RC_INFINITY_PRICE;
@@ -818,11 +776,7 @@ fn helper2(
                     let mut pos_state_next = (position + len_test) & coder.pos_mask;
 
                     let cur_and_len_literal_price = cur_and_len_price
-                        + rc_bit_0_price(
-                            *coder.is_match[state_2 as usize][pos_state_next as usize]
-                                .lock()
-                                .unwrap(),
-                        )
+                        + rc_bit_0_price(coder.is_match[state_2 as usize][pos_state_next as usize])
                         + get_literal_price(
                             coder,
                             position + len_test,
@@ -836,12 +790,8 @@ fn helper2(
                     pos_state_next = (pos_state_next + 1) & coder.pos_mask;
 
                     let next_rep_match_price = cur_and_len_literal_price
-                        + rc_bit_1_price(
-                            *coder.is_match[state_2 as usize][pos_state_next as usize]
-                                .lock()
-                                .unwrap(),
-                        )
-                        + rc_bit_1_price(*coder.is_rep[state_2 as usize].lock().unwrap());
+                        + rc_bit_1_price(coder.is_match[state_2 as usize][pos_state_next as usize])
+                        + rc_bit_1_price(coder.is_rep[state_2 as usize]);
 
                     let offset = cur + len_test + 1 + len_test_2;
 
