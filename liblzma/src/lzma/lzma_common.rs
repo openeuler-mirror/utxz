@@ -9,8 +9,6 @@ use crate::{
     api::{LzmaOptionsLzma, LZMA_LCLP_MAX, LZMA_PB_MAX},
     rangecoder::Probability,
 };
-use num_enum::TryFromPrimitive;
-use std::sync::{Arc, Mutex};
 
 /// LzmaLzmaState 各状态对应的 const 常量（转换自枚举）
 pub const STATE_LIT_LIT: u32 = 0;
@@ -142,14 +140,14 @@ pub fn is_literal_state(state: u32) -> bool {
 //     };
 // }
 
-pub fn literal_init(probs: &mut [[Arc<Mutex<u16>>; LITERAL_CODER_SIZE]], lc: u32, lp: u32) {
+pub fn literal_init(probs: &mut [[u16; LITERAL_CODER_SIZE]], lc: u32, lp: u32) {
     assert!(lc + lp <= LZMA_LCLP_MAX);
 
     let coders = 1 << (lc + lp);
 
     for i in 0..coders {
         for j in 0..LITERAL_CODER_SIZE {
-            bit_reset(Arc::clone(&probs[i][j]));
+            bit_reset(&mut probs[i][j]);
         }
     }
 }
