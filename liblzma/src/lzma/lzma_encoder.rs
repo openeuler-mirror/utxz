@@ -26,7 +26,6 @@ use crate::{
     },
 };
 use common::{my_max, write32le};
-use std::sync::{Arc, Mutex};
 
 use super::{
     is_literal_state, lzma_lzma_optimum_fast, lzma_lzma_optimum_normal, update_long_rep,
@@ -62,9 +61,12 @@ const OPTS: usize = 1 << 12;
 /////////////
 fn literal_matched(
     rc: &mut LzmaRangeEncoder,
-    subcoder: &mut [Arc<Mutex<u16>>],
+    subcoder: &mut [u16],
     match_byte: u32,
     mut symbol: u32,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
 ) {
     let mut offset = 0x100;
     symbol += 1 << 8;
@@ -77,35 +79,52 @@ fn literal_matched(
         let subcoder_index = (offset + match_bit + (symbol >> 8)) as usize;
         let bit = (symbol >> 7) & 1;
 
-        rc_bit(rc, Arc::clone(&mut subcoder[subcoder_index]), bit);
+        if rc.rc_bit(&mut subcoder[subcoder_index], bit, out, out_pos, out_size) {
+            return;
+        }
 
         symbol <<= 1;
         offset &= !(match_byte ^ symbol);
     }
 }
 
-fn literal(coder: &mut LzmaLzma1Encoder, mf: &mut LzmaMf, position: u32) {
-    // 定位要编码的字节和子编码器
+fn literal(
+    coder: &mut LzmaLzma1Encoder,
+    mf: &mut LzmaMf,
+    position: u32,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) {
     let cur_byte = mf.buffer[mf.read_pos as usize - mf.read_ahead as usize];
 
     let index = (((position) & (coder.literal_pos_mask)) << (coder.literal_context_bits))
         + ((mf.buffer[(mf.read_pos - mf.read_ahead - 1) as usize]) as u32
             >> (8 - (coder.literal_context_bits)));
 
-    let mut subcoder = &mut (coder.literal)[index as usize];
+    let subcoder = &mut (coder.literal)[index as usize];
 
     if is_literal_state(coder.state) {
-        // 上一个 LZMA 符号是字面值。编码一个普通字面值，不使用匹配字节。
-        coder.rc.rc_bittree(subcoder, 8, cur_byte as u32);
+        if coder
+            .rc
+            .rc_bittree(subcoder, 8, cur_byte as u32, out, out_pos, out_size)
+        {
+            return;
+        }
     } else {
-        // 上一个 LZMA 符号是匹配。使用匹配的最后一个字节作为“匹配字节”。
-        // 即，比较当前字面值和匹配字节的位。
         let match_byte =
             mf.buffer[mf.read_pos as usize - coder.reps[0] as usize - 1 - mf.read_ahead as usize];
-        literal_matched(&mut coder.rc, subcoder, match_byte as u32, cur_byte as u32);
+        literal_matched(
+            &mut coder.rc,
+            subcoder,
+            match_byte as u32,
+            cur_byte as u32,
+            out,
+            out_pos,
+            out_size,
+        );
     }
 
-    // 更新字面值状态
     coder.state = update_literal(coder.state);
 }
 
@@ -116,21 +135,18 @@ fn length_update_prices(lc: &mut LzmaLengthEncoder, pos_state: u32) {
     let table_size = lc.table_size;
     lc.counters[pos_state as usize] = table_size;
 
-    let a0 = rc_bit_0_price(lc.choice.lock().unwrap().clone());
-    let a1 = rc_bit_1_price(lc.choice.lock().unwrap().clone());
-    let b0 = a1 + rc_bit_0_price(lc.choice2.lock().unwrap().clone());
-    let b1 = a1 + rc_bit_1_price(lc.choice2.lock().unwrap().clone());
+    let a0 = rc_bit_0_price(lc.choice);
+    let a1 = rc_bit_1_price(lc.choice);
+    let b0 = a1 + rc_bit_0_price(lc.choice2);
+    let b1 = a1 + rc_bit_1_price(lc.choice2);
     let prices = &mut lc.prices[pos_state as usize];
 
     let mut i = 0;
-    // 注意 i的取值范围，
-    // 处理 LEN_LOW_SYMBOLS 范围
     for i in 0..table_size.min(LEN_LOW_SYMBOLS as u32) {
         prices[i as usize] =
             a0 + rc_bittree_price(&lc.low[pos_state as usize], LEN_LOW_BITS as u32, i);
     }
 
-    // 处理 LEN_MID_SYMBOLS 范围
     for i in
         LEN_LOW_SYMBOLS..table_size.min(LEN_LOW_SYMBOLS as u32 + LEN_MID_SYMBOLS as u32) as usize
     {
@@ -142,7 +158,6 @@ fn length_update_prices(lc: &mut LzmaLengthEncoder, pos_state: u32) {
             );
     }
 
-    // 处理剩余的部分
     for i in (LEN_LOW_SYMBOLS + LEN_MID_SYMBOLS)..table_size as usize {
         prices[i as usize] = b1
             + rc_bittree_price(
@@ -159,25 +174,62 @@ fn length(
     pos_state: u32,
     mut len: u32,
     fast_mode: bool,
-) {
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     assert!(len <= MATCH_LEN_MAX as u32);
     len -= MATCH_LEN_MIN as u32;
 
     if len < LEN_LOW_SYMBOLS as u32 {
-        rc_bit(rc, Arc::clone(&lc.choice), 0);
-
-        rc.rc_bittree(&mut lc.low[pos_state as usize], LEN_LOW_BITS as u32, len);
+        if rc.rc_bit(&mut lc.choice, 0, out, out_pos, out_size) {
+            return true;
+        }
+        if rc.rc_bittree(
+            &mut lc.low[pos_state as usize],
+            LEN_LOW_BITS as u32,
+            len,
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
     } else {
-        rc_bit(rc, Arc::clone(&lc.choice), 1);
+        if rc.rc_bit(&mut lc.choice, 1, out, out_pos, out_size) {
+            return true;
+        }
         len -= LEN_LOW_SYMBOLS as u32;
 
         if len < LEN_MID_SYMBOLS as u32 {
-            rc_bit(rc, Arc::clone(&lc.choice2), 0);
-            rc.rc_bittree(&mut lc.mid[pos_state as usize], LEN_MID_BITS as u32, len);
+            if rc.rc_bit(&mut lc.choice2, 0, out, out_pos, out_size) {
+                return true;
+            }
+            if rc.rc_bittree(
+                &mut lc.mid[pos_state as usize],
+                LEN_MID_BITS as u32,
+                len,
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
         } else {
-            rc_bit(rc, Arc::clone(&lc.choice2), 1);
+            if rc.rc_bit(&mut lc.choice2, 1, out, out_pos, out_size) {
+                return true;
+            }
             len -= LEN_MID_SYMBOLS as u32;
-            rc.rc_bittree(&mut lc.high, LEN_HIGH_BITS as u32, len);
+            if rc.rc_bittree(
+                &mut lc.high,
+                LEN_HIGH_BITS as u32,
+                len,
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
         }
     }
     if !fast_mode {
@@ -187,65 +239,104 @@ fn length(
             length_update_prices(lc, pos_state);
         }
     }
+
+    false
 }
 
 ///////////
 // Match //
 ///////////
-fn match_lzma(coder: &mut LzmaLzma1Encoder, pos_state: u32, distance: u32, len: u32) {
+fn match_lzma(
+    coder: &mut LzmaLzma1Encoder,
+    pos_state: u32,
+    distance: u32,
+    len: u32,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     update_match(&mut coder.state);
 
-    length(
+    if length(
         &mut coder.rc,
         &mut coder.match_len_encoder,
         pos_state,
         len,
         coder.fast_mode,
-    );
+        out,
+        out_pos,
+        out_size,
+    ) {
+        return true;
+    }
 
     let dist_slot = get_dist_slot(distance);
     let dist_state = get_dist_state!(len);
-    coder.rc.rc_bittree(
+    if coder.rc.rc_bittree(
         &mut coder.dist_slot[dist_state as usize],
         DIST_SLOT_BITS as u32,
         dist_slot,
-    );
+        out,
+        out_pos,
+        out_size,
+    ) {
+        return true;
+    }
 
     if dist_slot >= DIST_MODEL_START as u32 {
         let footer_bits = (dist_slot >> 1) - 1;
         let base = (2 | (dist_slot & 1)) << footer_bits;
         let dist_reduced = distance - base;
 
-        // Careful here: base - dist_slot - 1 can be -1, but
-        // rc_bittree_reverse starts at probs[1], not probs[0].
         let mut flags: u8 = 0;
         if dist_slot < DIST_MODEL_END as u32 {
             if (base - dist_slot) < 1 {
                 flags = 1;
-                coder.rc.rc_bittree_reverse(
+                if coder.rc.rc_bittree_reverse(
                     &mut coder.dist_special[(0) as usize..],
                     footer_bits,
                     dist_reduced,
                     flags,
-                );
+                    out,
+                    out_pos,
+                    out_size,
+                ) {
+                    return true;
+                }
             } else {
-                coder.rc.rc_bittree_reverse(
+                if coder.rc.rc_bittree_reverse(
                     &mut coder.dist_special[(base - dist_slot - 1) as usize..],
                     footer_bits,
                     dist_reduced,
                     flags,
-                );
+                    out,
+                    out_pos,
+                    out_size,
+                ) {
+                    return true;
+                }
             }
         } else {
-            coder
-                .rc
-                .rc_direct(dist_reduced >> ALIGN_BITS, footer_bits - ALIGN_BITS as u32);
-            coder.rc.rc_bittree_reverse(
+            if coder.rc.rc_direct(
+                dist_reduced >> ALIGN_BITS,
+                footer_bits - ALIGN_BITS as u32,
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
+            if coder.rc.rc_bittree_reverse(
                 &mut coder.dist_align,
                 ALIGN_BITS as u32,
                 dist_reduced & ALIGN_MASK as u32,
                 flags,
-            );
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
             coder.align_price_count += 1;
         }
     }
@@ -255,49 +346,89 @@ fn match_lzma(coder: &mut LzmaLzma1Encoder, pos_state: u32, distance: u32, len: 
     coder.reps[1] = coder.reps[0];
     coder.reps[0] = distance;
     coder.match_price_count += 1;
+
+    false
 }
 
 ////////////////////
 // Repeated match //
 ////////////////////
 
-fn rep_match(coder: &mut LzmaLzma1Encoder, pos_state: u32, rep: u32, len: u32) {
+fn rep_match(
+    coder: &mut LzmaLzma1Encoder,
+    pos_state: u32,
+    rep: u32,
+    len: u32,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     if rep == 0 {
-        rc_bit(
+        if rc_bit(
             &mut coder.rc,
-            Arc::clone(&coder.is_rep0[coder.state as usize]),
+            &mut coder.is_rep0[coder.state as usize],
             0,
-        );
-        rc_bit(
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
+        if rc_bit(
             &mut coder.rc,
-            Arc::clone(&coder.is_rep0_long[coder.state as usize][pos_state as usize]),
+            &mut coder.is_rep0_long[coder.state as usize][pos_state as usize],
             (len != 1) as u32,
-        );
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
     } else {
         let distance = coder.reps[rep as usize];
-        rc_bit(
+        if rc_bit(
             &mut coder.rc,
-            Arc::clone(&coder.is_rep0[coder.state as usize]),
+            &mut coder.is_rep0[coder.state as usize],
             1,
-        );
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
 
         if rep == 1 {
-            rc_bit(
+            if rc_bit(
                 &mut coder.rc,
-                Arc::clone(&coder.is_rep1[coder.state as usize]),
+                &mut coder.is_rep1[coder.state as usize],
                 0,
-            );
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
         } else {
-            rc_bit(
+            if rc_bit(
                 &mut coder.rc,
-                Arc::clone(&coder.is_rep1[coder.state as usize]),
+                &mut coder.is_rep1[coder.state as usize],
                 1,
-            );
-            rc_bit(
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
+            if rc_bit(
                 &mut coder.rc,
-                Arc::clone(&coder.is_rep2[coder.state as usize]),
+                &mut coder.is_rep2[coder.state as usize],
                 rep - 2,
-            );
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
 
             if rep == 3 {
                 coder.reps[3] = coder.reps[2];
@@ -313,16 +444,22 @@ fn rep_match(coder: &mut LzmaLzma1Encoder, pos_state: u32, rep: u32, len: u32) {
     if len == 1 {
         update_short_rep(&mut coder.state);
     } else {
-        // println!("rep match       length");
-        length(
+        if length(
             &mut coder.rc,
             &mut coder.rep_len_encoder,
             pos_state,
             len,
             coder.fast_mode,
-        );
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
         update_long_rep(&mut coder.state);
     }
+
+    false
 }
 
 //////////
@@ -335,95 +472,165 @@ fn encode_symbol(
     back: u32,
     len: u32,
     position: u32,
-) {
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     let pos_state = position & coder.pos_mask;
 
     if back == u32::MAX {
-        // 字面值，即八位字节
         assert!(len == 1);
-        rc_bit(
+        if rc_bit(
             &mut coder.rc,
-            Arc::clone(&coder.is_match[coder.state as usize][pos_state as usize]),
+            &mut coder.is_match[coder.state as usize][pos_state as usize],
             0,
-        );
-        literal(coder, mf, position);
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
+        literal(coder, mf, position, out, out_pos, out_size);
     } else {
-        // 某种类型的匹配
-        rc_bit(
+        if rc_bit(
             &mut coder.rc,
-            Arc::clone(&coder.is_match[coder.state as usize][pos_state as usize]),
+            &mut coder.is_match[coder.state as usize][pos_state as usize],
             1,
-        );
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
 
         if back < REPS as u32 {
-            // 这是一个重复匹配，即之前使用过相同的距离。
-            rc_bit(
+            if rc_bit(
                 &mut coder.rc,
-                Arc::clone(&coder.is_rep[coder.state as usize]),
+                &mut coder.is_rep[coder.state as usize],
                 1,
-            );
-            rep_match(coder, pos_state, back, len);
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
+            if rep_match(coder, pos_state, back, len, out, out_pos, out_size) {
+                return true;
+            }
         } else {
-            // 正常匹配
-            rc_bit(
+            if rc_bit(
                 &mut coder.rc,
-                Arc::clone(&coder.is_rep[coder.state as usize]),
+                &mut coder.is_rep[coder.state as usize],
                 0,
-            );
-            match_lzma(coder, pos_state, back - REPS as u32, len);
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
+            if match_lzma(
+                coder,
+                pos_state,
+                back - REPS as u32,
+                len,
+                out,
+                out_pos,
+                out_size,
+            ) {
+                return true;
+            }
         }
     }
 
     assert!(mf.read_ahead >= len);
     mf.read_ahead -= len;
+    false
 }
 
-fn encode_init(coder: &mut LzmaLzma1Encoder, mf: &mut LzmaMf) -> bool {
-    // 确保匹配查找器的位置为0
+fn encode_init(
+    coder: &mut LzmaLzma1Encoder,
+    mf: &mut LzmaMf,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     assert!(mf_position(mf) == 0);
-    // 确保未压缩数据的大小为0
     assert!(coder.uncomp_size == 0);
 
     if mf.read_pos == mf.read_limit {
-        // 如果没有更多数据可供读取
         if mf.action == LzmaAction::Run {
-            return false; // 无法进行任何操作
+            return false;
         }
 
-        // 正在结束编码（在刷新时不会到达这里）
         assert!(mf.write_pos == mf.read_pos);
         assert!(mf.action == LzmaAction::Finish);
     } else {
-        // 执行实际初始化。第一个LZMA符号必须始终是字面值。
         mf_skip(mf, 1);
         mf.read_ahead = 0;
-        // rc_bit(&mut coder.rc, Arc::clone(&coder.is_match[0][0]), 0);
-        coder.rc.rc_bit(Arc::clone(&coder.is_match[0][0]), 0);
-        coder
+        if coder
             .rc
-            .rc_bittree(&mut coder.literal[0], 8, mf.buffer[0] as u32);
+            .rc_bit(&mut coder.is_match[0][0], 0, out, out_pos, out_size)
+        {
+            return true;
+        }
+        if coder.rc.rc_bittree(
+            &mut coder.literal[0],
+            8,
+            mf.buffer[0] as u32,
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return true;
+        }
         coder.uncomp_size += 1;
     }
 
-    // 初始化完成（如果不是空文件）
     coder.is_initialized = true;
 
-    true
+    false
 }
 
-fn encode_eopm(coder: &mut LzmaLzma1Encoder, position: u32) {
+fn encode_eopm(
+    coder: &mut LzmaLzma1Encoder,
+    position: u32,
+    out: &mut [u8],
+    out_pos: &mut usize,
+    out_size: usize,
+) -> bool {
     let pos_state = position & coder.pos_mask;
-    rc_bit(
+    if rc_bit(
         &mut coder.rc,
-        Arc::clone(&coder.is_match[coder.state as usize][pos_state as usize]),
+        &mut coder.is_match[coder.state as usize][pos_state as usize],
         1,
-    );
-    rc_bit(
+        out,
+        out_pos,
+        out_size,
+    ) {
+        return true;
+    }
+    if rc_bit(
         &mut coder.rc,
-        Arc::clone(&coder.is_rep[coder.state as usize]),
+        &mut coder.is_rep[coder.state as usize],
         0,
-    );
-    match_lzma(coder, pos_state, u32::MAX, MATCH_LEN_MIN as u32);
+        out,
+        out_pos,
+        out_size,
+    ) {
+        return true;
+    }
+    if match_lzma(
+        coder,
+        pos_state,
+        u32::MAX,
+        MATCH_LEN_MIN as u32,
+        out,
+        out_pos,
+        out_size,
+    ) {
+        return true;
+    }
+    false
 }
 
 pub const LOOP_INPUT_MAX: usize = OPTS + 1;
@@ -436,23 +643,20 @@ pub fn lzma_lzma_encode(
     out_size: usize,
     limit: u32,
 ) -> LzmaRet {
-    // println!("============ lzma_lzma_encode");
-    // 如果没有数据被编码，初始化流。
-    if !coder.is_initialized && !encode_init(coder, mf) {
-        return LzmaRet::Ok;
-    }
-
-    // 编码范围编码器中的待处理输出字节
-    if coder.rc.rc_encode(out, out_pos, out_size) {
-        assert!(limit == u32::MAX);
-        return LzmaRet::Ok;
+    if !coder.is_initialized {
+        if encode_init(coder, mf, out, out_pos, out_size) {
+            return LzmaRet::Ok;
+        }
+        if !coder.is_initialized {
+            return LzmaRet::Ok;
+        }
     }
 
     if coder.is_flushed {
         assert!(limit == u32::MAX);
         return LzmaRet::StreamEnd;
     }
-    // println!("mf {:#?}", mf);
+
     let mut len: u32 = 0;
     let mut back: u32 = 0;
     loop {
@@ -480,19 +684,24 @@ pub fn lzma_lzma_encode(
             lzma_lzma_optimum_normal(coder, mf, &mut back, &mut len, coder.uncomp_size as u32)
         };
 
-        encode_symbol(coder, mf, back, len, coder.uncomp_size as u32);
+        if encode_symbol(
+            coder,
+            mf,
+            back,
+            len,
+            coder.uncomp_size as u32,
+            out,
+            out_pos,
+            out_size,
+        ) {
+            return LzmaRet::Ok;
+        }
 
-        if coder.out_limit != 0 && rc_encode_dummy(&mut coder.rc, coder.out_limit) {
-            coder.rc.rc_forget();
+        if coder.out_limit != 0 && rc_encode_dummy(&coder.rc, coder.out_limit) {
             break;
         }
 
         coder.uncomp_size += len as u64;
-
-        if coder.rc.rc_encode(out, out_pos, out_size) {
-            assert!(limit == u32::MAX);
-            return LzmaRet::Ok;
-        }
     }
 
     if !coder.uncomp_size_ptr.is_none() {
@@ -500,13 +709,12 @@ pub fn lzma_lzma_encode(
     }
 
     if coder.use_eopm {
-        encode_eopm(coder, coder.uncomp_size as u32);
+        if encode_eopm(coder, coder.uncomp_size as u32, out, out_pos, out_size) {
+            return LzmaRet::Ok;
+        }
     }
 
-    coder.rc.rc_flush();
-
-    if coder.rc.rc_encode(out, out_pos, out_size) {
-        assert!(limit == u32::MAX);
+    if coder.rc.rc_flush(out, out_pos, out_size) {
         coder.is_flushed = true;
         return LzmaRet::Ok;
     }
@@ -525,7 +733,6 @@ fn lzma_encode(
         return LzmaRet::OptionsError;
     }
 
-    // let coder = coder.downcast_mut::<LzmaLzma1Encoder>().unwrap();
     let coder = match coder {
         LzEncoderType::LzmaEncoderPrivate(coder) => coder,
         _ => panic!("Invalid coder type"),
@@ -538,12 +745,10 @@ fn lzma_lzma_set_out_limit(
     uncomp_size: &mut u64,
     out_limit: u64,
 ) -> LzmaRet {
-    // 最小输出大小为 5 字节，但不能容纳任何输出，因此我们使用 6 字节。
     if out_limit < 6 {
         return LzmaRet::BufError;
     }
 
-    // let coder = coder_ptr.downcast_mut::<LzmaLzma1Encoder>().unwrap();
     let coder = match coder_ptr {
         LzEncoderType::LzmaEncoderPrivate(coder) => coder,
         _ => panic!("Invalid coder type"),
@@ -559,7 +764,6 @@ fn lzma_lzma_set_out_limit(
 ////////////////////
 
 fn is_options_valid(options: &LzmaOptionsLzma) -> bool {
-    // 验证一些选项。LZ 编码器也验证 nice_len，但我们需要在此处提前验证。
     is_lclppb_valid(options)
         && options.nice_len >= MATCH_LEN_MIN as u32
         && options.nice_len <= MATCH_LEN_MAX as u32
@@ -567,7 +771,6 @@ fn is_options_valid(options: &LzmaOptionsLzma) -> bool {
 }
 
 fn set_lz_options(lz_options: &mut LzmaLzOptions, options: &LzmaOptionsLzma) {
-    // LZ 编码器初始化会验证这些选项，因此我们不需要在这里验证。
     lz_options.before_size = OPTS;
     lz_options.dict_size = options.dict_size as usize;
     lz_options.after_size = LOOP_INPUT_MAX;
@@ -583,20 +786,16 @@ fn set_lz_options(lz_options: &mut LzmaLzOptions, options: &LzmaOptionsLzma) {
 }
 
 fn length_encoder_reset(lencoder: &mut LzmaLengthEncoder, num_pos_states: u32, fast_mode: bool) {
-    // 重置 choice 和 choice2 位
-    bit_reset(Arc::clone(&lencoder.choice));
-    bit_reset(Arc::clone(&lencoder.choice2));
+    bit_reset(&mut lencoder.choice);
+    bit_reset(&mut lencoder.choice2);
 
-    // 重置每个 pos_state 的低位和中位比特树
     for pos_state in 0..num_pos_states {
         bittree_reset(&mut lencoder.low[pos_state as usize], LEN_LOW_BITS);
         bittree_reset(&mut lencoder.mid[pos_state as usize], LEN_MID_BITS);
     }
 
-    // 重置高位比特树
     bittree_reset(&mut lencoder.high, LEN_HIGH_BITS);
 
-    // 如果不是 fast_mode，更新价格
     if !fast_mode {
         for pos_state in 0..num_pos_states {
             length_update_prices(lencoder, pos_state);
@@ -613,10 +812,8 @@ pub fn lzma_lzma_encoder_reset(coder: &mut LzmaLzma1Encoder, options: &LzmaOptio
     coder.literal_context_bits = options.lc;
     coder.literal_pos_mask = (1 << options.lp) - 1;
 
-    // 范围编码器重置
     coder.rc.rc_reset();
 
-    // 状态初始化
     coder.state = STATE_LIT_LIT;
     for i in 0..REPS {
         coder.reps[i] = 0;
@@ -624,31 +821,28 @@ pub fn lzma_lzma_encoder_reset(coder: &mut LzmaLzma1Encoder, options: &LzmaOptio
 
     literal_init(&mut *coder.literal, options.lc, options.lp);
 
-    // 比特编码器重置
     for i in 0..STATES {
         for j in 0..=coder.pos_mask as usize {
-            bit_reset(Arc::clone(&coder.is_match[i][j]));
-            bit_reset(Arc::clone(&coder.is_rep0_long[i][j]));
+            bit_reset(&mut coder.is_match[i][j]);
+            bit_reset(&mut coder.is_rep0_long[i][j]);
         }
 
-        bit_reset(Arc::clone(&coder.is_rep[i]));
-        bit_reset(Arc::clone(&coder.is_rep0[i]));
-        bit_reset(Arc::clone(&coder.is_rep1[i]));
-        bit_reset(Arc::clone(&coder.is_rep2[i]));
+        bit_reset(&mut coder.is_rep[i]);
+        bit_reset(&mut coder.is_rep0[i]);
+        bit_reset(&mut coder.is_rep1[i]);
+        bit_reset(&mut coder.is_rep2[i]);
     }
 
     for i in 0..FULL_DISTANCES - DIST_MODEL_END {
-        bit_reset(Arc::clone(&coder.dist_special[i]));
+        bit_reset(&mut coder.dist_special[i]);
     }
 
-    // 比特树编码器重置
     for i in 0..DIST_STATES {
         bittree_reset(&mut coder.dist_slot[i], DIST_SLOT_BITS);
     }
 
     bittree_reset(&mut coder.dist_align, ALIGN_BITS);
 
-    // 长度编码器重置
     length_encoder_reset(
         &mut coder.match_len_encoder,
         1 << options.pb,
@@ -657,7 +851,6 @@ pub fn lzma_lzma_encoder_reset(coder: &mut LzmaLzma1Encoder, options: &LzmaOptio
 
     length_encoder_reset(&mut coder.rep_len_encoder, 1 << options.pb, coder.fast_mode);
 
-    // 价格计数初始化
     coder.match_price_count = u32::MAX / 2;
     coder.align_price_count = u32::MAX / 2;
 
@@ -682,15 +875,7 @@ pub fn lzma_lzma_encoder_create(
         },
         None => &mut LzmaLzma1Encoder::new(),
     };
-    // let mut coder: Box<LzmaLzma1Encoder> = match coder_ptr {
-    //     Some(coder_) => match coder_ {
-    //         LzEncoderType::LzmaEncoderPrivate(t) => Box::new(t.to_owned()),
-    //         _ => panic!("Invalid coder type"),
-    //     },
-    //     None => Box::new(LzmaLzma1Encoder::default()),
-    // };
 
-    // 设置压缩模式。注意，我们尚未验证选项。无效选项将在函数末尾的 lzma_lzma_encoder_reset() 调用中被拒绝。
     match options.mode {
         LzmaMode::Fast => {
             coder.fast_mode = true;
@@ -698,8 +883,6 @@ pub fn lzma_lzma_encoder_create(
         LzmaMode::Normal => {
             coder.fast_mode = false;
 
-            // 设置 dist_table_size。
-            // 将字典大小向上舍入到下一个 2^n。
             if options.dict_size > (1 << 30) + (1 << 29) {
                 return LzmaRet::OptionsError;
             }
@@ -711,7 +894,6 @@ pub fn lzma_lzma_encoder_create(
 
             coder.dist_table_size = log_size * 2;
 
-            // 长度编码器的价格表大小
             let nice_len = my_max(mf_get_hash_bytes(options.mf.clone()), options.nice_len);
 
             coder.match_len_encoder.table_size = nice_len + 1 - MATCH_LEN_MIN as u32;
@@ -723,22 +905,15 @@ pub fn lzma_lzma_encoder_create(
         }
     }
 
-    // 如果有非空的预设字典，则不需要将第一个字节写为字面值。
     coder.is_initialized = options.preset_dict.is_some() && options.preset_dict_size > 0;
     coder.is_flushed = false;
     coder.uncomp_size = 0;
     coder.uncomp_size_ptr = None;
 
-    // 默认情况下禁用输出大小限制。
     coder.out_limit = 0;
 
-    // 确定是否需要结束标记：
-    // - LZMA2 从不使用它。
-    // - LZMA_FILTER_LZMA1 始终使用它（除非稍后调用 lzma_lzma_set_out_limit()）。
-    // - LZMA_FILTER_LZMA1EXT 在选项中有一个标志。
     coder.use_eopm = id == LZMA_FILTER_LZMA1;
     if id == LZMA_FILTER_LZMA1EXT {
-        // 检查是否存在不支持的标志。
         if options.ext_flags & !LZMA_LZMA1EXT_ALLOW_EOPM != 0 {
             return LzmaRet::OptionsError;
         }
@@ -788,19 +963,6 @@ pub fn lzma_lzma_encoder_memusage(options: &LzmaOptionsType) -> u64 {
     std::mem::size_of::<LzmaLzma1Encoder>() as u64 + lz_memusage
 }
 
-// pub fn lzma_lzma_lclppb_encode(options: &LzmaOptionsLzma, byte: *mut u8) -> bool {
-//     if !is_lclppb_valid(options) {
-//         return true;
-//     }
-
-//     unsafe {
-//         *byte = ((options.pb * 5 + options.lp) * 9 + options.lc) as u8 ;
-//         assert!(*byte <= (4 * 5 + 4) * 9 + 8);
-//     }
-
-//     false
-// }
-
 pub fn lzma_lzma_lclppb_encode(options: &LzmaOptionsLzma, byte: &mut [u8]) -> bool {
     if !is_lclppb_valid(options) {
         return true;
@@ -817,12 +979,10 @@ pub fn lzma_lzma_props_encode(options: &LzmaOptionsType, out: &mut [u8]) -> Lzma
         return LzmaRet::ProgError;
     }
 
-    // let opt = &mut LzmaOptionsLzma::default();
     let opt = match options {
         LzmaOptionsType::LzmaOptionsLzma(c) => c,
         _ => return LzmaRet::ProgError,
     };
-    // let opt = options.unwrap();
     if lzma_lzma_lclppb_encode(opt, out) {
         return LzmaRet::OptionsError;
     }
