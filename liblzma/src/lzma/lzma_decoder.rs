@@ -15,8 +15,8 @@ use crate::{
     bit_reset, bittree_reset,
     common::{LzmaFilterInfo, LzmaNextCoder},
     lz::{
-        dict_get, dict_put, dict_repeat, lzma_lz_decoder_init, lzma_lz_decoder_memusage,
-        LzCoderType, LzmaDict, LzmaLzDecoder, LzmaLzDecoderOptions,
+        dict_get_unchecked, dict_put_unchecked, dict_repeat, lzma_lz_decoder_init,
+        lzma_lz_decoder_memusage, LzCoderType, LzmaDict, LzmaLzDecoder, LzmaLzDecoderOptions,
     },
     lzma::{
         update_match, update_short_rep, ALIGN_BITS, DIST_MODEL_START, DIST_SLOT_BITS,
@@ -161,53 +161,16 @@ pub enum Sequence {
     Normalize,
     IsMatch,
     Literal,
-    Literal1,
-    Literal2,
-    Literal3,
-    Literal4,
-    Literal5,
-    Literal6,
-    Literal7,
     LiteralMatched,
-    LiteralMatched1,
-    LiteralMatched2,
-    LiteralMatched3,
-    LiteralMatched4,
-    LiteralMatched5,
-    LiteralMatched6,
-    LiteralMatched7,
     LiteralWrite,
     IsRep,
     MatchLenChoice,
-    MatchLenLow0,
-    MatchLenLow1,
-    MatchLenLow2,
     MatchLenChoice2,
     MatchLenBitTree,
-    MatchLenMid0,
-    MatchLenMid1,
-    MatchLenMid2,
-    MatchLenHigh0,
-    MatchLenHigh1,
-    MatchLenHigh2,
-    MatchLenHigh3,
-    MatchLenHigh4,
-    MatchLenHigh5,
-    MatchLenHigh6,
-    MatchLenHigh7,
     DistSlot,
-    DistSlot1,
-    DistSlot2,
-    DistSlot3,
-    DistSlot4,
-    DistSlot5,
     DistModel,
     Direct,
     Align,
-    Align0,
-    Align1,
-    Align2,
-    Align3,
     Eopm,
     IsRep0,
     ShortRep,
@@ -217,27 +180,13 @@ pub enum Sequence {
     RepLenChoice,
     RepLenBitTree,
     RepLenChoice2,
-    RepLenLow0,
-    RepLenLow1,
-    RepLenLow2,
-    RepLenMid0,
-    RepLenMid1,
-    RepLenMid2,
-    RepLenHigh0,
-    RepLenHigh1,
-    RepLenHigh2,
-    RepLenHigh3,
-    RepLenHigh4,
-    RepLenHigh5,
-    RepLenHigh6,
-    RepLenHigh7,
     Copy,
 }
 
 pub fn lzma_decode(
     coder_ptr: &mut LzCoderType,
     dictptr: &mut LzmaDict,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
@@ -252,9 +201,10 @@ pub fn lzma_decode(
         return ret;
     }
 
-    // 复制字典
-    let mut dict = dictptr.clone();
-    let dict_start = dict.pos;
+    let dict_start = dictptr.pos;
+
+    // 使用裸指针避免 input[rc_in_pos] 的 slice 边界检查
+    let input_ptr = input.as_ptr();
 
     //rc_to_local(&mut coder.rc, *in_pos);
     let mut rc = coder.rc.clone();
@@ -269,7 +219,7 @@ pub fn lzma_decode(
     let mut rep3 = coder.rep3;
     let pos_mask = coder.pos_mask;
 
-    let mut probs_line_ref = coder.probs.load(Ordering::SeqCst); // 初始化coder.probs 的数据
+    let mut probs_line_ref = coder.probs.load(Ordering::Relaxed); // 初始化coder.probs 的数据
     let mut probs_data_offset: isize = 0;
 
     let mut symbol: u32 = coder.symbol;
@@ -279,7 +229,7 @@ pub fn lzma_decode(
     let mut len = coder.len;
     let literal_pos_mask = coder.literal_pos_mask;
     let literal_context_bits = coder.literal_context_bits;
-    let mut pos_state = dict.pos & pos_mask as usize;
+    let mut pos_state = dictptr.pos & pos_mask as usize;
     let mut ret = LzmaRet::Ok;
     let mut match_bit: u32 = 0;
     let mut subcoder_index: u32 = 0;
@@ -287,14 +237,44 @@ pub fn lzma_decode(
 
     let mut goto_flag = false; // 是否跳转到out处
 
+    // Helper macro: decode one range-coded bit with normalize + probability update
+    // Uses &mut *ptr for noalias (like C's restrict) — tells LLVM the pointer doesn't alias rc fields
+    macro_rules! decode_bit {
+        ($prob_ptr:expr, $action0:expr, $action1:expr, $next_seq_save:expr) => {{
+            if rc.range < (1 << 24) {
+                if rc_in_pos == in_size {
+                    coder.sequence = $next_seq_save;
+                    break;
+                }
+                rc.range <<= 8;
+                rc.code = (rc.code << 8) | (*input_ptr.add(rc_in_pos) as u32);
+                rc_in_pos += 1;
+            }
+            let p = unsafe { &mut *$prob_ptr };
+            rc_bound = (rc.range >> 11).wrapping_mul(*p as u32);
+            if rc.code < rc_bound {
+                rc.range = rc_bound;
+                *p = (*p as u32 + (((1 << 11) - *p as u32) >> 5)) as u16;
+                symbol = (symbol << 1);
+                $action0;
+            } else {
+                rc.range = rc.range.wrapping_sub(rc_bound);
+                rc.code = rc.code.wrapping_sub(rc_bound);
+                *p = (*p as u32 - (*p as u32 >> 5)) as u16;
+                symbol = (symbol << 1) + 1;
+                $action1;
+            }
+        }};
+    }
+
     // 检查是否允许 EOPM
     let mut eopm_is_valid = coder.uncompressed_size == u64::MAX;
     let mut might_finish_without_eopm = false;
 
     if coder.uncompressed_size != u64::MAX
-        && (coder.uncompressed_size as usize) <= dict.limit - dict.pos
+        && (coder.uncompressed_size as usize) <= dictptr.limit - dictptr.pos
     {
-        dict.limit = dict.pos + coder.uncompressed_size as usize;
+        dictptr.limit = dictptr.pos + coder.uncompressed_size as usize;
         might_finish_without_eopm = true;
     }
 
@@ -304,14 +284,14 @@ pub fn lzma_decode(
     unsafe {
         loop {
             if udate_pos_state {
-                pos_state = dict.pos & pos_mask as usize;
+                pos_state = dictptr.pos & pos_mask as usize;
                 udate_pos_state = false;
             }
 
             match next_sequence {
                 // 核心分支1
                 Sequence::Normalize | Sequence::IsMatch => {
-                    if might_finish_without_eopm && dict.pos == dict.limit {
+                    if might_finish_without_eopm && dictptr.pos == dictptr.limit {
                         rc_normalize!(
                             rc,
                             coder.sequence = Sequence::Normalize,
@@ -350,9 +330,9 @@ pub fn lzma_decode(
                         //println!("is_match[{}][{}]: {}, rc_bound: {}, rc.code: {}, rc.range: {}, rc_in_pos: {}, in_size: {}, input[rc_in_pos]: {}", state, pos_state, coder.is_match[state as usize][pos_state as usize], rc_bound, rc.code, rc.range, rc_in_pos,in_size,input[rc_in_pos]);
 
                         // 字面量解析
-                        let dg = dict_get(&dict, 0);
+                        let dg = dict_get_unchecked(dictptr, 0);
 
-                        let index = ((dict.pos & literal_pos_mask as usize)
+                        let index = ((dictptr.pos & literal_pos_mask as usize)
                             << literal_context_bits as usize)
                             + ((dg as u32 >> (8 - literal_context_bits)) as usize);
                         probs_line_ref = coder.literal[index].as_mut_ptr();
@@ -363,7 +343,7 @@ pub fn lzma_decode(
                         if state < LIT_STATES.try_into().unwrap() {
                             next_sequence = Sequence::Literal;
                         } else {
-                            len = (dict_get(&dict, rep0) as u32) << 1;
+                            len = (dict_get_unchecked(dictptr, rep0) as u32) << 1;
                             offset = 0x100;
                             next_sequence = Sequence::LiteralMatched;
                         }
@@ -378,138 +358,46 @@ pub fn lzma_decode(
                         next_sequence = Sequence::IsRep;
                     }
                 }
-                // 承接 Is match 分支
+                // 合并的 Literal 解码: symbol 从 1 开始, 8 位后 >= 256, 一次 match 分支解全部位
                 Sequence::Literal => {
-                    // 解码字面量（无匹配字节）
-                    while symbol < (1 << 8) {
-                        // rc_bit!(
-                        //     rc,
-                        //     probs_line_ref[(symbol as isize+ probs_data_offset) as usize],
-                        //     symbol,
-                        //     (),
-                        //     (),
-                        //     rc_in_pos,
-                        //     in_size,
-                        //     input,
-                        //     rc_bound,
-                        //     coder.sequence = Sequence::Literal,
-                        //     goto_flag
-                        // );
-                        if rc.range < (1 << 24) {
-                            if rc_in_pos == in_size {
-                                goto_flag = true;
-                                coder.sequence = Sequence::Literal;
-                                break;
-                            }
-                            rc.range <<= 8;
-                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
-                            rc_in_pos += 1;
-                        }
-                        rc_bound = (rc.range >> 11).wrapping_mul(
-                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
-                                as u32,
-                        );
-                        if rc.code < rc_bound {
-                            rc.range = rc_bound;
-
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur + (((1 << 11) - cur) >> 5));
-                            p.write(new_val);
-                            symbol = (symbol << 1);
-                        } else {
-                            rc.range = rc.range.wrapping_sub(rc_bound);
-                            rc.code = rc.code.wrapping_sub(rc_bound);
-
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur - ((cur) >> 5));
-                            p.write(new_val);
-
-                            symbol = (symbol << 1) + 1;
-                        }
+                    decode_bit!(
+                        probs_line_ref.offset(symbol as isize),
+                        {},
+                        {},
+                        Sequence::Literal
+                    );
+                    if symbol >= 256 {
+                        state = NEXT_STATE[state as usize];
+                        next_sequence = Sequence::LiteralWrite;
                     }
-                    if goto_flag {
-                        goto_flag = false;
-                        break;
-                    }
-                    state = NEXT_STATE[state as usize];
-
-                    next_sequence = Sequence::LiteralWrite;
                 }
-                // 承接 Is match 分支
+                // 合并的 LiteralMatched 解码: symbol >= 256 时 8 位全部解完
                 Sequence::LiteralMatched => {
-                    // 解码字面量（有匹配字节）
-                    while symbol < (1 << 8) {
-                        let match_bit = len & offset;
-                        let subcoder_index = offset + match_bit + symbol;
-                        // rc_bit!(
-                        //     rc,
-                        //     probs_line_ref[(subcoder_index as isize + probs_data_offset) as usize],
-                        //     symbol,
-                        //     offset = offset & !match_bit,
-                        //     offset = offset & match_bit,
-                        //     rc_in_pos,
-                        //     in_size,
-                        //     input,
-                        //     rc_bound,
-                        //     coder.sequence = Sequence::LiteralMatched,
-                        //     goto_flag
-                        // );
-
-                        if rc.range < (1 << 24) {
-                            if rc_in_pos == in_size {
-                                goto_flag = true;
-                                coder.sequence = Sequence::LiteralMatched;
-                                break;
-                            }
-                            rc.range <<= 8;
-                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
-                            rc_in_pos += 1;
-                        }
-                        rc_bound = (rc.range >> 11).wrapping_mul(
-                            *probs_line_ref.offset(subcoder_index as isize + probs_data_offset)
-                                as u32,
-                        );
-                        if rc.code < rc_bound {
-                            rc.range = rc_bound;
-
-                            let p =
-                                probs_line_ref.offset(subcoder_index as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur + (((1 << 11) - cur) >> 5));
-                            p.write(new_val);
-                            symbol = (symbol << 1);
-                            offset = offset & !match_bit;
-                        } else {
-                            rc.range = rc.range.wrapping_sub(rc_bound);
-                            rc.code = rc.code.wrapping_sub(rc_bound);
-
-                            let p =
-                                probs_line_ref.offset(subcoder_index as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur - ((cur) >> 5));
-                            p.write(new_val);
-
-                            symbol = (symbol << 1) + 1;
-                            offset = offset & match_bit;
-                        }
-
-                        len <<= 1;
+                    match_bit = len & offset;
+                    subcoder_index = offset + match_bit + symbol;
+                    decode_bit!(
+                        probs_line_ref.offset(subcoder_index as isize),
+                        {
+                            offset &= !match_bit;
+                        },
+                        {
+                            offset &= match_bit;
+                        },
+                        Sequence::LiteralMatched
+                    );
+                    len <<= 1;
+                    if symbol >= 256 {
+                        state = NEXT_STATE[state as usize];
+                        next_sequence = Sequence::LiteralWrite;
                     }
-                    if goto_flag {
-                        goto_flag = false;
-                        break;
-                    }
-                    state = NEXT_STATE[state as usize];
-                    next_sequence = Sequence::LiteralWrite;
                 }
 
                 Sequence::LiteralWrite => {
-                    if dict_put(&mut dict, symbol as u8) {
+                    if dictptr.pos == dictptr.limit {
                         coder.sequence = Sequence::LiteralWrite;
                         break;
                     }
+                    dict_put_unchecked(dictptr, symbol as u8);
                     next_sequence = Sequence::IsMatch;
                     udate_pos_state = true;
                     continue;
@@ -541,7 +429,7 @@ pub fn lzma_decode(
                         next_sequence = Sequence::MatchLenChoice;
                     } else {
                         rc_update_1!(rc, coder.is_rep[state as usize], rc_bound);
-                        if !dict_is_distance_valid(&dict, 0) {
+                        if !dict_is_distance_valid(dictptr, 0) {
                             ret = LzmaRet::DataError;
                             break;
                         }
@@ -558,7 +446,7 @@ pub fn lzma_decode(
                             break;
                         }
                         rc.range <<= 8;
-                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                         rc_in_pos += 1;
                     }
                     rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice);
@@ -589,7 +477,7 @@ pub fn lzma_decode(
                             break;
                         }
                         rc.range <<= 8;
-                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                         rc_in_pos += 1;
                     }
                     rc_bound = (rc.range >> 11) * u32::from(coder.match_len_decoder.choice2);
@@ -624,31 +512,28 @@ pub fn lzma_decode(
                                 break;
                             }
                             rc.range <<= 8;
-                            rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                            rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                             rc_in_pos += 1;
                         }
 
-                        rc_bound = (rc.range >> 11)
-                            * u32::from(
-                                *probs_line_ref
-                                    .offset((symbol as isize + probs_data_offset) as isize),
-                            );
+                        rc_bound = (rc.range >> 11).wrapping_mul(
+                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
+                                as u32,
+                        );
                         if rc.code < rc_bound {
                             rc.range = rc_bound;
-                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] += ((1 << 11) - probs_line_ref[(symbol as isize + probs_data_offset) as usize]) >> 5;
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur + (((1 << 11) - cur) >> 5));
-                            p.write(new_val);
+                            let p = unsafe {
+                                &mut *probs_line_ref.offset(symbol as isize + probs_data_offset)
+                            };
+                            *p = ((*p as u32) + (((1 << 11) - (*p as u32)) >> 5)) as u16;
                             symbol <<= 1;
                         } else {
-                            rc.range -= rc_bound;
-                            rc.code -= rc_bound;
-                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] -= probs_line_ref[(symbol as isize + probs_data_offset) as usize] >> 5;
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur - ((cur) >> 5));
-                            p.write(new_val);
+                            rc.range = rc.range.wrapping_sub(rc_bound);
+                            rc.code = rc.code.wrapping_sub(rc_bound);
+                            let p = unsafe {
+                                &mut *probs_line_ref.offset(symbol as isize + probs_data_offset)
+                            };
+                            *p = ((*p as u32) - ((*p as u32) >> 5)) as u16;
                             symbol = (symbol << 1) + 1;
                         }
                     }
@@ -663,153 +548,73 @@ pub fn lzma_decode(
                     symbol = 1;
                     next_sequence = Sequence::DistSlot;
                 }
+                // 合并的 DistSlot 解码: symbol >= DIST_SLOTS 时 6 位全部解完
                 Sequence::DistSlot => {
-                    while symbol < DIST_SLOTS as u32 {
-                        // rc_bit!(
-                        //     rc,
-                        //     probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        //     symbol,
-                        //     (),
-                        //     (),
-                        //     rc_in_pos,
-                        //     in_size,
-                        //     input,
-                        //     rc_bound,
-                        //     coder.sequence = Sequence::DistSlot,
-                        //     goto_flag
-                        // );
+                    decode_bit!(
+                        probs_line_ref.offset(symbol as isize),
+                        {},
+                        {},
+                        Sequence::DistSlot
+                    );
+                    if symbol >= DIST_SLOTS as u32 {
+                        // all 6 bits decoded
+                        symbol -= DIST_SLOTS as u32;
 
-                        if rc.range < crate::rangecoder::range_common::RC_TOP_VALUE {
-                            if rc_in_pos == in_size {
-                                goto_flag = true;
-                                coder.sequence = Sequence::DistSlot;
+                        if symbol < DIST_MODEL_START as u32 {
+                            // Match distances [0, 3] have only two bits.
+                            rep0 = symbol;
+
+                            if !dict_is_distance_valid(dictptr, rep0 as usize) {
+                                ret = LzmaRet::DataError;
                                 break;
                             }
-                            rc.range <<= crate::rangecoder::range_common::RC_SHIFT_BITS;
-                            rc.code = (rc.code << crate::rangecoder::range_common::RC_SHIFT_BITS)
-                                | (input[rc_in_pos] as u32);
-                            rc_in_pos += 1;
-                        }
-                        rc_bound = (rc.range >> 11).wrapping_mul(
-                            *probs_line_ref.offset((symbol as isize + probs_data_offset) as isize)
-                                as u32,
-                        );
-                        if rc.code < rc_bound {
-                            rc.range = rc_bound;
-
-                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = ((probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32).wrapping_add(((crate::rangecoder::range_common::RC_BIT_MODEL_TOTAL - probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32) >> crate::rangecoder::range_common::RC_MOVE_BITS))) as u16;
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur + (((1 << 11) - cur) >> 5));
-                            p.write(new_val);
-                            symbol = (symbol << 1);
+                            next_sequence = Sequence::Copy;
                         } else {
-                            rc.range = rc.range.wrapping_sub(rc_bound);
-                            rc.code = rc.code.wrapping_sub(rc_bound);
+                            // Decode the lowest [1, 29] bits of
+                            // the match distance.
+                            limit = (symbol >> 1) - 1;
+                            assert!(limit >= 1 && limit <= 30);
 
-                            // let tmp = (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 - (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 >> crate::rangecoder::range_common::RC_MOVE_BITS)) as u16;
-                            // // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 - (probs_line_ref[(symbol as isize + probs_data_offset) as usize] as u32 >> crate::rangecoder::range_common::RC_MOVE_BITS)) as u16;
+                            rep0 = 2 + (symbol & 1);
 
-                            // probs_line_ref[(symbol as isize + probs_data_offset) as usize] = tmp;
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur - ((cur) >> 5));
-                            p.write(new_val);
+                            if (symbol < DIST_MODEL_END.try_into().unwrap()) {
+                                // Prepare to decode the low bits for
+                                // a distance of [4, 127].
+                                assert!(limit <= 5);
+                                rep0 <<= limit;
+                                assert!(rep0 <= 96);
 
-                            symbol = (symbol << 1) + 1;
-                        }
-                    }
-                    if goto_flag {
-                        goto_flag = false;
-                        break;
-                    }
-                    symbol -= DIST_SLOTS as u32;
-                    // println!("symbol = {}", symbol);
+                                assert!((rep0 as i32 - symbol as i32 - 1) >= -1);
 
-                    if symbol < DIST_MODEL_START as u32 {
-                        // Match distances [0, 3] have only two bits.
-                        rep0 = symbol;
+                                let base: isize = (rep0 as isize) - (symbol as isize) - 1;
+                                assert!(base <= 82);
+                                assert!(
+                                    base >= -1 && base <= (coder.pos_special.len() as isize) - 1
+                                );
 
-                        if !dict_is_distance_valid(&dict, rep0 as usize) {
-                            ret = LzmaRet::DataError;
-                            break;
-                        }
-                        next_sequence = Sequence::Copy;
-                    } else {
-                        // Decode the lowest [1, 29] bits of
-                        // the match distance.
-                        limit = (symbol >> 1) - 1;
-                        // println!("limit = {}", limit);
-                        assert!(limit >= 1 && limit <= 30);
+                                probs_line_ref = if base >= 0 {
+                                    probs_data_offset = 0;
+                                    coder.pos_special[(base) as usize..].as_mut_ptr()
+                                } else {
+                                    probs_data_offset = -1;
+                                    coder.pos_special[0..].as_mut_ptr()
+                                };
 
-                        rep0 = 2 + (symbol & 1);
-
-                        if (symbol < DIST_MODEL_END.try_into().unwrap()) {
-                            // Prepare to decode the low bits for
-                            // a distance of [4, 127].
-                            assert!(limit <= 5);
-                            rep0 <<= limit;
-                            assert!(rep0 <= 96);
-
-                            // -1 is fine, because we start
-                            // decoding at probs[1], not probs[0].
-                            // NOTE: This violates the C standard,
-                            // since we are doing pointer
-                            // arithmetic past the beginning of
-                            // the array.
-                            // 等价于C代码中的: assert((int32_t)(rep0 - symbol - 1) >= -1);
-                            // 在C中，当rep0 < symbol + 1时，无符号减法会溢出，转换为int32_t后为负数
-                            // 但在这种情况下，我们仍然允许-1，因为注释说明"从probs[1]开始解码，而不是probs[0]"
-                            assert!((rep0 as i32 - symbol as i32 - 1) >= -1);
-
-                            let base: isize = (rep0 as isize) - (symbol as isize) - 1;
-                            assert!(base <= 82);
-                            assert!(base >= -1 && base <= (coder.pos_special.len() as isize) - 1); // 对应 C 的断言
-                                                                                                   // 只允许 base >= 0 时用切片，否则 panic 或特殊处理
-
-                            probs_line_ref = if base >= 0 {
-                                probs_data_offset = 0;
-
-                                coder.pos_special[(base) as usize..].as_mut_ptr()
-                            //这里还是使用实际的位置，通过 probs_data_offset 和C代码保持一致，抵消总是从 probs[1] 计算的影响
+                                symbol = 1;
+                                offset = 0;
+                                next_sequence = Sequence::DistModel;
                             } else {
-                                // base == -1 时，probs[1] 恰好是 pos_special[0]
-                                // 这里可以用偏移量修正
-                                probs_data_offset = -1;
-                                coder.pos_special[0..].as_mut_ptr()
-                            };
-
-                            //  probs_line_ref = &mut coder.pos_special[(rep0 - symbol - 1) as usize..];
-                            symbol = 1;
-                            offset = 0;
-                            next_sequence = Sequence::DistModel;
-                        } else {
-                            assert!(symbol >= 14);
-                            assert!(limit >= 6);
-                            limit -= ALIGN_BITS as u32;
-
-                            assert!(limit >= 2);
-
-                            next_sequence = Sequence::Direct;
+                                assert!(symbol >= 14);
+                                assert!(limit >= 6);
+                                limit -= ALIGN_BITS as u32;
+                                assert!(limit >= 2);
+                                next_sequence = Sequence::Direct;
+                            }
                         }
                     }
                 }
                 Sequence::DistModel => {
                     while offset < limit as u32 {
-                        // rc_bit!(
-                        //     rc,
-                        //     probs_line_ref[(symbol as isize + probs_data_offset) as usize],
-                        //     symbol,
-                        //     (),
-                        //     rep0 = rep0 + (1 << offset),
-                        //     rc_in_pos,
-                        //     in_size,
-                        //     input,
-                        //     rc_bound,
-                        //     coder.sequence = Sequence::DistModel,
-                        //     goto_flag
-                        // );
-
                         if rc.range < (1 << 24) {
                             if rc_in_pos == in_size {
                                 goto_flag = true;
@@ -817,7 +622,7 @@ pub fn lzma_decode(
                                 break;
                             }
                             rc.range <<= 8;
-                            rc.code = (rc.code << 8) | (input[rc_in_pos] as u32);
+                            rc.code = (rc.code << 8) | (*input_ptr.add(rc_in_pos) as u32);
                             rc_in_pos += 1;
                         }
                         rc_bound = (rc.range >> 11).wrapping_mul(
@@ -826,21 +631,18 @@ pub fn lzma_decode(
                         );
                         if rc.code < rc_bound {
                             rc.range = rc_bound;
-
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur + (((1 << 11) - cur) >> 5));
-                            p.write(new_val);
+                            let p = unsafe {
+                                &mut *probs_line_ref.offset(symbol as isize + probs_data_offset)
+                            };
+                            *p = ((*p as u32) + (((1 << 11) - (*p as u32)) >> 5)) as u16;
                             symbol = (symbol << 1);
                         } else {
                             rc.range = rc.range.wrapping_sub(rc_bound);
                             rc.code = rc.code.wrapping_sub(rc_bound);
-
-                            let p = probs_line_ref.offset(symbol as isize + probs_data_offset);
-                            let cur = p.read();
-                            let new_val = (cur - ((cur) >> 5));
-                            p.write(new_val);
-
+                            let p = unsafe {
+                                &mut *probs_line_ref.offset(symbol as isize + probs_data_offset)
+                            };
+                            *p = ((*p as u32) - ((*p as u32) >> 5)) as u16;
                             symbol = (symbol << 1) + 1;
                             rep0 = rep0 + (1 << offset);
                         }
@@ -851,7 +653,7 @@ pub fn lzma_decode(
                         goto_flag = false;
                         break;
                     }
-                    if !dict_is_distance_valid(&dict, rep0 as usize) {
+                    if !dict_is_distance_valid(dictptr, rep0 as usize) {
                         ret = LzmaRet::DataError;
                         break;
                     }
@@ -876,44 +678,51 @@ pub fn lzma_decode(
                         break;
                     }
                     rep0 <<= ALIGN_BITS;
-                    symbol = 1;
-                    offset = 0;
+                    symbol = 0;
+                    offset = 1;
 
                     next_sequence = Sequence::Align;
                 }
+                // 合并的 Align 解码: offset 追踪位权重 (1,2,4,8), offset>8 时 4 位全解完
                 Sequence::Align => {
-                    while offset < ALIGN_BITS as u32 {
-                        rc_bit!(
-                            rc,
-                            coder.pos_align[symbol as usize],
-                            symbol,
-                            (),
-                            rep0 = rep0 + (1 << offset),
-                            rc_in_pos,
-                            in_size,
-                            input,
-                            rc_bound,
-                            coder.sequence = Sequence::Align,
-                            goto_flag
-                        );
-                        offset += 1;
-                    }
-                    if goto_flag {
-                        goto_flag = false;
-                        break;
-                    }
-                    if rep0 == u32::MAX {
-                        if !eopm_is_valid {
-                            ret = LzmaRet::DataError;
+                    if rc.range < (1 << 24) {
+                        if rc_in_pos == in_size {
+                            coder.sequence = Sequence::Align;
                             break;
                         }
-                        next_sequence = Sequence::Eopm;
+                        rc.range <<= 8;
+                        rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
+                        rc_in_pos += 1;
+                    }
+                    rc_bound =
+                        (rc.range >> 11) * u32::from(coder.pos_align[(offset + symbol) as usize]);
+                    if rc.code < rc_bound {
+                        rc.range = rc_bound;
+                        let p = &mut coder.pos_align[(offset + symbol) as usize];
+                        *p += ((1 << 11) - *p) >> 5;
                     } else {
-                        if !dict_is_distance_valid(&dict, rep0 as usize) {
-                            ret = LzmaRet::DataError;
-                            break;
+                        rc.range -= rc_bound;
+                        rc.code -= rc_bound;
+                        let p = &mut coder.pos_align[(offset + symbol) as usize];
+                        *p -= *p >> 5;
+                        symbol += offset;
+                    }
+                    offset <<= 1;
+                    if offset > 8 {
+                        rep0 += symbol;
+                        if rep0 == u32::MAX {
+                            if !eopm_is_valid {
+                                ret = LzmaRet::DataError;
+                                break;
+                            }
+                            next_sequence = Sequence::Eopm;
+                        } else {
+                            if !dict_is_distance_valid(dictptr, rep0 as usize) {
+                                ret = LzmaRet::DataError;
+                                break;
+                            }
+                            next_sequence = Sequence::Copy;
                         }
-                        next_sequence = Sequence::Copy;
                     }
                 }
                 Sequence::Eopm => {
@@ -988,10 +797,11 @@ pub fn lzma_decode(
                     }
                 }
                 Sequence::ShortRep => {
-                    let byte = dict_get(&dict, rep0);
-                    if dict_put(&mut dict, byte) {
+                    let byte = dict_get_unchecked(dictptr, rep0);
+                    if dictptr.pos == dictptr.limit {
                         break;
                     }
+                    dict_put_unchecked(dictptr, byte);
                     next_sequence = Sequence::IsMatch;
                     udate_pos_state = true;
                     continue;
@@ -1061,7 +871,7 @@ pub fn lzma_decode(
                             break;
                         }
                         rc.range <<= 8;
-                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                         rc_in_pos += 1;
                     }
                     rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice);
@@ -1091,7 +901,7 @@ pub fn lzma_decode(
                             break;
                         }
                         rc.range <<= 8;
-                        rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                        rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                         rc_in_pos += 1;
                     }
                     rc_bound = (rc.range >> 11) * u32::from(coder.rep_len_decoder.choice2);
@@ -1120,11 +930,12 @@ pub fn lzma_decode(
                     while symbol < limit {
                         if rc.range < (1 << 24) {
                             if rc_in_pos == in_size {
+                                goto_flag = true;
                                 coder.sequence = Sequence::RepLenBitTree;
                                 break;
                             }
                             rc.range <<= 8;
-                            rc.code = (rc.code << 8) | u32::from(input[rc_in_pos]);
+                            rc.code = (rc.code << 8) | u32::from(*input_ptr.add(rc_in_pos));
                             rc_in_pos += 1;
                         }
 
@@ -1132,26 +943,20 @@ pub fn lzma_decode(
                             (rc.range >> 11) * u32::from(*probs_line_ref.offset(symbol as isize));
                         if rc.code < rc_bound {
                             rc.range = rc_bound;
-
-                            // probs_line_ref.offset(symbol as usize) += ((1 << 11) - probs_line_ref.offset(symbol as usize)) >> 5;
-
-                            // Read current probability, compute updated value and write it back.
-                            let p = probs_line_ref.offset(symbol as isize);
-                            let cur = p.read() as u32;
-                            let new_val = (cur + (((1u32 << 11) - cur) >> 5)) as u16;
-                            p.write(new_val);
-
+                            let p = unsafe { &mut *probs_line_ref.offset(symbol as isize) };
+                            *p = ((*p as u32) + (((1 << 11) - (*p as u32)) >> 5)) as u16;
                             symbol <<= 1;
                         } else {
                             rc.range -= rc_bound;
                             rc.code -= rc_bound;
-                            // probs_line_ref[symbol as usize] -= probs_line_ref[symbol as usize] >> 5;
-                            let p = probs_line_ref.offset(symbol as isize);
-                            let cur = p.read() as u32;
-                            let new_val = (cur - (cur >> 5)) as u16;
-                            p.write(new_val);
+                            let p = unsafe { &mut *probs_line_ref.offset(symbol as isize) };
+                            *p = ((*p as u32) - ((*p as u32) >> 5)) as u16;
                             symbol = (symbol << 1) + 1;
                         }
+                    }
+                    if goto_flag {
+                        goto_flag = false;
+                        break;
                     }
                     len += symbol - limit;
 
@@ -1161,7 +966,7 @@ pub fn lzma_decode(
                 // 核心分支3
                 Sequence::Copy => {
                     let mut len_usize = len as usize;
-                    if dict_repeat(&mut dict, rep0 as usize, &mut len_usize) {
+                    if dict_repeat(dictptr, rep0 as usize, &mut len_usize) {
                         len = len_usize as u32;
                         coder.sequence = Sequence::Copy;
                         break;
@@ -1177,9 +982,6 @@ pub fn lzma_decode(
 
         // out:
         // 更新状态
-        *dictptr = dict.clone();
-        dictptr.pos = dict.pos;
-        dictptr.full = dict.full;
         coder.rc = rc;
         *in_pos = rc_in_pos;
         coder.state = state;
@@ -1187,22 +989,23 @@ pub fn lzma_decode(
         coder.rep1 = rep1;
         coder.rep2 = rep2;
         coder.rep3 = rep3;
+        coder.sequence = next_sequence;
         // coder.probs = probs_line_ref.to_vec().into_boxed_slice();
-        coder.probs.store(probs_line_ref, Ordering::SeqCst);
+        coder.probs.store(probs_line_ref, Ordering::Relaxed);
         coder.symbol = symbol;
         coder.limit = limit;
         coder.offset = offset;
         coder.len = len;
 
         if coder.uncompressed_size != u64::MAX {
-            coder.uncompressed_size -= (dict.pos - dict_start) as u64;
+            coder.uncompressed_size -= (dictptr.pos - dict_start) as u64;
             if coder.uncompressed_size == 0
                 && ret == LzmaRet::Ok
                 && (coder.sequence == Sequence::LiteralWrite
                     || coder.sequence == Sequence::ShortRep
                     || coder.sequence == Sequence::Copy)
             {
-                ret = LzmaRet::DataError;
+                ret = LzmaRet::StreamEnd;
             }
         }
 
