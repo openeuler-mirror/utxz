@@ -15,7 +15,7 @@ use crate::{
 
 use super::{lzma_delta_coder_init, lzma_delta_coder_memusage, LzmaDeltaCoder};
 
-fn copy_and_encode(coder: &mut LzmaDeltaCoder, in_: &Vec<u8>, out: &mut [u8], size: usize) {
+fn copy_and_encode(coder: &mut LzmaDeltaCoder, in_: &[u8], out: &mut [u8], size: usize) {
     let distance = coder.distance;
 
     for i in 0..size {
@@ -40,7 +40,7 @@ fn encode_in_place(coder: &mut LzmaDeltaCoder, buffer: &mut [u8], size: usize) {
 fn delta_encode(
     coder_ptr: &mut CoderType,
 
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
