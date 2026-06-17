@@ -11,6 +11,10 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
+#![allow(clippy::all)]
+#![allow(ambiguous_glob_reexports)]
+#![allow(private_interfaces)]
+
 #[allow(unused_variables)]
 #[allow(non_upper_case_globals)]
 #[macro_use]
