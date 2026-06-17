@@ -34,6 +34,7 @@ enum Sequence {
 pub struct LzmaLzma2Decoder {
     sequence: Sequence,
     next_sequence: Sequence,
+    control: u8,
     lzma: Box<LzmaLzDecoder>,
     uncompressed_size: usize,
     compressed_size: usize,
@@ -47,6 +48,7 @@ impl Default for LzmaLzma2Decoder {
         LzmaLzma2Decoder {
             sequence: Sequence::default(),      // 假设 Sequence 实现了 Default
             next_sequence: Sequence::default(), // 假设 Sequence 实现了 Default
+            control: 0,
             lzma: Box::new(LzmaLzDecoder::default()), // 假设 LzmaLzDecoder 实现了 Default
             uncompressed_size: 0,
             compressed_size: 0,
@@ -60,7 +62,7 @@ impl Default for LzmaLzma2Decoder {
 fn lzma2_decode(
     coder_ptr: &mut LzCoderType,
     dict: &mut LzmaDict,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
@@ -75,6 +77,7 @@ fn lzma2_decode(
             Sequence::Control => {
                 let control = input[*in_pos];
                 *in_pos += 1;
+                coder.control = control;
 
                 if control == 0x00 {
                     return LzmaRet::StreamEnd;
