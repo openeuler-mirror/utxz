@@ -24,7 +24,7 @@ fn decode_buffer(coder: &mut LzmaDeltaCoder, buffer: &mut Vec<u8>, size: usize) 
 fn delta_decode(
     coder_ptr: &mut CoderType,
 
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     out: &mut [u8],
