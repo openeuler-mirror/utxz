@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use std::os::raw::c_void;
-
-use libc::memcpy;
 use num_enum::TryFromPrimitive;
+use std::os::raw::c_void;
 
 use crate::{
     api::{
@@ -133,7 +131,7 @@ fn block_encoder_init(coder: &mut LzmaStreamEncoder) -> LzmaRet {
 
 fn stream_encode(
     coder_ptr: &mut CoderType,
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
