@@ -30,14 +30,15 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use utxz_sys::{fcntl as sys_fcntl, fs as sys_fs, poll as sys_poll, unistd as sys_unistd};
 
-pub const IO_BUFFER_SIZE: usize = libc::BUFSIZ as usize & !(7_u32 as usize);
+pub const IO_BUFFER_SIZE: usize = 262144;
 
 use std::mem;
 
 use crate::args::{OPT_FORCE, OPT_KEEP_ORIGINAL, OPT_STDOUT, STDIN_FILENAME};
 use crate::coder::{OperationMode, OPT_MODE};
-use crate::message::{message_bug, message_error, message_fatal};
+use crate::message::{message_bug, message_error, message_fatal, message_warning};
 use crate::mytime::{mytime_get_flush_timeout, mytime_set_flush_time};
 use crate::signals::{signals_block, signals_unblock, USER_ABORT};
 use crate::suffix::suffix_get_dest_name;
@@ -141,18 +142,11 @@ impl FilePair {
         // 获取源文件和目标文件的元数据
         fn get_stat(path: &str) -> stat {
             let c_path = CString::new(path).unwrap();
-            let mut stat_buf: stat = unsafe { std::mem::zeroed() };
-            let ret = unsafe { libc::stat(c_path.as_ptr() as *const c_char, &mut stat_buf) };
-            assert_eq!(ret, 0, "stat failed");
-            stat_buf
+            sys_fs::stat(&c_path).expect("stat failed")
         }
 
-        let src_st = src_name
-            .map(|s| get_stat(s))
-            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
-        let dest_st = dest_name
-            .map(|s| get_stat(s))
-            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+        let src_st = src_name.map(get_stat).unwrap_or_else(sys_fs::zeroed_stat);
+        let dest_st = dest_name.map(get_stat).unwrap_or_else(sys_fs::zeroed_stat);
 
         FilePair {
             src_name: src_name.map(|s| s.to_string()),
@@ -207,25 +201,28 @@ pub fn io_init() {
     tuklib_open_stdxxx(E_ERROR);
 
     // 如果当前用户是 root，则在 fchown 失败时显示警告
-    *WARN_FCHOWN.lock().unwrap() = unsafe { libc::geteuid() == 0 };
+    *WARN_FCHOWN.lock().unwrap() = sys_unistd::geteuid() == 0;
 
     // 创建用于用户中断的自管道
-    let mut pipe_fds = [0 as RawFd; 2];
-    if unsafe { pipe(pipe_fds.as_mut_ptr()) } != 0 {
-        message_fatal(
-            &format!("创建管道失败: {}", std::io::Error::last_os_error()),
-            format_args!(""),
-        );
-    }
+    let pipe_fds = match sys_unistd::pipe() {
+        Ok(fds) => fds,
+        Err(e) => {
+            message_fatal(&format!("创建管道失败: {}", e), format_args!(""));
+            unreachable!();
+        }
+    };
 
     // 将管道的两端设置为非阻塞模式
     for i in 0..2 {
-        let flags = unsafe { fcntl(pipe_fds[i], F_GETFL) };
-        if flags == -1 || unsafe { fcntl(pipe_fds[i], F_SETFL, flags | O_NONBLOCK) } == -1 {
-            message_fatal(
-                &format!("设置管道非阻塞失败: {}", std::io::Error::last_os_error()),
-                format_args!(""),
-            );
+        let flags = match sys_fcntl::fcntl_getfl(pipe_fds[i]) {
+            Ok(v) => v,
+            Err(e) => {
+                message_fatal(&format!("设置管道非阻塞失败: {}", e), format_args!(""));
+                unreachable!();
+            }
+        };
+        if let Err(e) = sys_fcntl::fcntl_setfl(pipe_fds[i], flags | O_NONBLOCK) {
+            message_fatal(&format!("设置管道非阻塞失败: {}", e), format_args!(""));
         }
     }
 
@@ -237,7 +234,7 @@ pub fn io_init() {
 pub fn io_write_to_user_abort_pipe() {
     let b: u8 = b'\0';
     let pipe_fds = USER_ABORT_PIPE.lock().unwrap();
-    let _ = unsafe { libc::write(pipe_fds[1], &b as *const u8 as *const libc::c_void, 1) };
+    let _ = sys_unistd::write(pipe_fds[1], &[b]);
 }
 
 /// 禁用稀疏文件功能
@@ -265,30 +262,30 @@ fn io_wait(pair: &FilePair, timeout: i32, is_reading: bool) -> IoWaitRet {
     ];
 
     loop {
-        let ret = unsafe { poll(pfd.as_mut_ptr(), pfd.len() as u64, timeout) };
+        let ret = match sys_poll::poll(&mut pfd, timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::Interrupted || e.kind() == io::ErrorKind::WouldBlock {
+                    continue;
+                }
+
+                message_error(
+                    &format!(
+                        "{}: poll() 失败: {}",
+                        if is_reading {
+                            pair.src_name.as_deref().unwrap_or("(stdin)")
+                        } else {
+                            pair.dest_name.as_deref().unwrap_or("(stdout)")
+                        },
+                        e
+                    ),
+                    format_args!(""),
+                );
+                return IoWaitRet::IoWaitError;
+            }
+        };
 
         if *USER_ABORT.lock().unwrap() {
-            return IoWaitRet::IoWaitError;
-        }
-
-        if ret == -1 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted || err.kind() == io::ErrorKind::WouldBlock {
-                continue;
-            }
-
-            message_error(
-                &format!(
-                    "{}: poll() 失败: {}",
-                    if is_reading {
-                        pair.src_name.as_deref().unwrap_or("(stdin)")
-                    } else {
-                        pair.dest_name.as_deref().unwrap_or("(stdout)")
-                    },
-                    err
-                ),
-                format_args!(""),
-            );
             return IoWaitRet::IoWaitError;
         }
 
@@ -310,87 +307,79 @@ fn io_unlink(name: &str, known_st: &libc::stat) {
     } else {
         fs::symlink_metadata(name)
     };
-    unsafe {
-        match stat_ret {
-            Ok(new_st) => {
-                // 检查设备号和 inode 是否一致，避免误删
-                if new_st.dev() != known_st.st_dev as u64 || new_st.ino() != known_st.st_ino as u64
-                {
-                    eprintln!("警告：{}: 文件似乎已被移动，未删除", name);
-                    return;
-                }
-                // 有竞争条件，但我们已尽力避免误删
-                let c_name = CString::new(name).expect("CString::new failed");
-                if unlink(c_name.as_ptr()) != 0 {
-                    let e = std::io::Error::last_os_error();
-                    eprintln!("警告：{}: 无法删除: {}", name, e);
-                }
-            }
-            Err(_) => {
+    match stat_ret {
+        Ok(new_st) => {
+            // 检查设备号和 inode 是否一致，避免误删
+            if new_st.dev() != known_st.st_dev as u64 || new_st.ino() != known_st.st_ino as u64 {
                 eprintln!("警告：{}: 文件似乎已被移动，未删除", name);
+                return;
             }
+            // 有竞争条件，但我们已尽力避免误删
+            let c_name = CString::new(name).expect("CString::new failed");
+            if let Err(e) = sys_fs::unlink(&c_name) {
+                eprintln!("警告：{}: 无法删除: {}", name, e);
+            }
+        }
+        Err(_) => {
+            eprintln!("警告：{}: 文件似乎已被移动，未删除", name);
         }
     }
 }
 
 /// 拷贝文件属性
 fn io_copy_attrs(pair: &FilePair) {
-    unsafe {
-        // 设置文件所有者
-        if fchown(pair.dest_fd, pair.src_st.st_uid, 1) != 0 && *WARN_FCHOWN.lock().unwrap() {
-            eprintln!(
-                "警告：{:#?}: 无法设置文件所有者: {}",
-                pair.dest_name,
-                std::io::Error::last_os_error()
-            );
-        }
-
-        let mut mode: u32;
-
-        // 设置文件组
-        if pair.dest_st.st_gid != pair.src_st.st_gid
-            && fchown(pair.dest_fd, 1, pair.src_st.st_gid) != 0
-        {
-            eprintln!(
-                "警告：{:#?}: 无法设置文件组: {}",
-                pair.dest_name,
-                std::io::Error::last_os_error()
-            );
-            // 降级权限
-            mode = ((pair.src_st.st_mode & 0o070) >> 3) & (pair.src_st.st_mode & 0o007);
-            mode = (pair.src_st.st_mode & 0o700) | (mode << 3) | mode;
-        } else {
-            // 去除 setuid/setgid/sticky 位
-            mode = pair.src_st.st_mode & 0o777;
-        }
-
-        // 设置权限
-        if fchmod(pair.dest_fd, mode) != 0 {
-            eprintln!(
-                "警告：{:#?}: 无法设置文件权限: {}",
-                pair.dest_name,
-                std::io::Error::last_os_error()
-            );
-        }
-
-        // 获取纳秒级时间戳
-        let atime_nsec = pair.src_st.st_atime_nsec;
-        let mtime_nsec = pair.src_st.st_mtime_nsec;
-
-        // 构造 timespec 结构体
-        let ts = [
-            libc::timespec {
-                tv_sec: pair.src_st.st_atime,
-                tv_nsec: pair.src_st.st_atime_nsec,
-            },
-            libc::timespec {
-                tv_sec: pair.src_st.st_mtime,
-                tv_nsec: pair.src_st.st_mtime_nsec,
-            },
-        ];
-
-        let _ = futimens(pair.dest_fd, ts.as_ptr());
+    // 设置文件所有者
+    if sys_fs::fchown(pair.dest_fd, pair.src_st.st_uid, !(0 as libc::gid_t)).is_err()
+        && *WARN_FCHOWN.lock().unwrap()
+    {
+        eprintln!(
+            "警告：{}: 无法设置文件所有者: {}",
+            pair.dest_name.as_deref().unwrap_or("(unknown)"),
+            std::io::Error::last_os_error()
+        );
     }
+
+    let mut mode: u32;
+
+    // 设置文件组
+    if pair.dest_st.st_gid != pair.src_st.st_gid
+        && sys_fs::fchown(pair.dest_fd, !(0 as libc::uid_t), pair.src_st.st_gid).is_err()
+    {
+        eprintln!(
+            "警告：{}: 无法设置文件组: {}",
+            pair.dest_name.as_deref().unwrap_or("(unknown)"),
+            std::io::Error::last_os_error()
+        );
+        // 降级权限
+        mode = ((pair.src_st.st_mode & 0o070) >> 3) & (pair.src_st.st_mode & 0o007);
+        mode = (pair.src_st.st_mode & 0o700) | (mode << 3) | mode;
+    } else {
+        // 去除 setuid/setgid/sticky 位
+        mode = pair.src_st.st_mode & 0o777;
+    }
+
+    // 设置权限
+    if sys_fs::fchmod(pair.dest_fd, mode).is_err() {
+        eprintln!(
+            "警告：{}: 无法设置文件权限: {}",
+            pair.dest_name.as_deref().unwrap_or("(unknown)"),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    // 构造 timespec 结构体
+    let ts = [
+        libc::timespec {
+            tv_sec: pair.src_st.st_atime,
+            tv_nsec: pair.src_st.st_atime_nsec,
+        },
+        libc::timespec {
+            tv_sec: pair.src_st.st_mtime,
+            tv_nsec: pair.src_st.st_mtime_nsec,
+        },
+    ];
+
+    let _ = sys_fs::futimens(pair.dest_fd, &ts);
 }
 
 pub fn s_isreg(mode: u32) -> bool {
@@ -398,154 +387,29 @@ pub fn s_isreg(mode: u32) -> bool {
 }
 /// 打开源文件，返回 true 表示出错，false 表示成功
 fn io_open_src_real(pair: &mut FilePair) -> bool {
-    unsafe {
-        // 如果读取的是标准输入
-        if pair.src_name == Some(STDIN_FILENAME.to_string()) {
-            pair.src_fd = STDIN_FILENO;
+    // 如果读取的是标准输入
+    if pair.src_name == Some(STDIN_FILENAME.to_string()) {
+        pair.src_fd = STDIN_FILENO;
 
-            *STDIN_FLAGS.lock().unwrap() = fcntl(STDIN_FILENO, F_GETFL);
-            if *STDIN_FLAGS.lock().unwrap() == -1 {
-                eprintln!(
-                    "错误：无法获取标准输入的文件状态标志: {}",
-                    std::io::Error::last_os_error()
-                );
+        match sys_fcntl::fcntl_getfl(STDIN_FILENO) {
+            Ok(v) => *STDIN_FLAGS.lock().unwrap() = v,
+            Err(e) => {
+                eprintln!("错误：无法获取标准输入的文件状态标志: {}", e);
                 return true;
             }
+        }
 
-            if (*STDIN_FLAGS.lock().unwrap() & O_NONBLOCK) == 0
-                && fcntl(
-                    STDIN_FILENO,
-                    F_SETFL,
-                    *STDIN_FLAGS.lock().unwrap() | O_NONBLOCK,
-                ) != -1
+        if (*STDIN_FLAGS.lock().unwrap() & O_NONBLOCK) == 0 {
+            if sys_fcntl::fcntl_setfl(STDIN_FILENO, *STDIN_FLAGS.lock().unwrap() | O_NONBLOCK)
+                .is_ok()
             {
                 *RESTORE_STDIN_FLAGS.lock().unwrap() = true;
-            }
-
-            // 忽略 posix_fadvise 的错误
-
-            posix_fadvise(
-                STDIN_FILENO,
-                0,
-                0,
-                if *OPT_MODE.lock().unwrap() == OperationMode::List {
-                    POSIX_FADV_RANDOM
-                } else {
-                    POSIX_FADV_SEQUENTIAL
-                },
-            );
-
-            return false;
-        }
-
-        // 是否跟随符号链接
-        let follow_symlinks = *OPT_STDOUT.lock().unwrap()
-            || *OPT_FORCE.lock().unwrap()
-            || *OPT_KEEP_ORIGINAL.lock().unwrap();
-        let reg_files_only = !*OPT_STDOUT.lock().unwrap();
-
-        // open() 标志
-        let mut flags = O_RDONLY | 0 | O_NOCTTY;
-        flags |= O_NONBLOCK;
-        if !follow_symlinks {
-            flags |= O_NOFOLLOW;
-        }
-
-        // 打开文件
-        let c_name = match &pair.src_name {
-            Some(name) => CString::new(name.as_str()).unwrap(),
-            None => panic!("源文件名为空"),
-        };
-
-        pair.src_fd = open(c_name.as_ptr(), flags, 0);
-
-        if pair.src_fd == -1 {
-            // EINTR 不应出现
-            assert!(*libc::__errno_location() != EINTR);
-
-            let mut was_symlink = false;
-            if *libc::__errno_location() == ELOOP && !follow_symlinks {
-                let mut st: stat = std::mem::zeroed();
-                if lstat(c_name.as_ptr(), &mut st) == 0 && S_IFLNK == st.st_mode {
-                    was_symlink = true;
-                }
-            }
-
-            if was_symlink {
-                eprintln!("警告：{:#?}: 是符号链接，已跳过", pair.src_name);
-            } else {
-                let err = std::io::Error::last_os_error();
-                eprintln!("错误：{:#?}: {}", pair.src_name, err);
-            }
-            return true;
-        }
-
-        // 获取文件状态
-        // let mut st: stat = std::mem::zeroed();
-        if fstat(pair.src_fd, &mut pair.src_st) != 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("错误：{:#?}: {}", pair.src_name, err);
-            close(pair.src_fd);
-            return true;
-        }
-
-        // 检查目录
-        if S_IFDIR == pair.src_st.st_mode {
-            eprintln!("警告：{:#?}: 是目录，已跳过", pair.src_name);
-            close(pair.src_fd);
-            return true;
-        }
-
-        // 只允许常规文件
-        // if reg_files_only && S_IFREG != (pair.src_st.st_mode & S_IFMT) {
-        // println!("reg_files_only:{}",reg_files_only);
-        // println!("st_mode: {}",pair.src_st.st_mode);
-        // if reg_files_only && (((pair.src_st.st_mode) & 0170000) == (0100000)) {
-        if reg_files_only && !((pair.src_st.st_mode & S_IFMT) == S_IFREG) {
-            eprintln!("警告：{:#?}: 不是常规文件，已跳过", pair.src_name);
-            close(pair.src_fd);
-            return true;
-        }
-
-        // 检查特殊权限和硬链接数
-        if reg_files_only && !*OPT_FORCE.lock().unwrap() && !*OPT_KEEP_ORIGINAL.lock().unwrap() {
-            let mode = pair.src_st.st_mode;
-            if (mode & S_ISUID as u32 != 0) || (mode & S_ISGID as u32 != 0) {
-                eprintln!(
-                    "警告：{:#?}: 文件设置了 setuid 或 setgid 位，已跳过",
-                    pair.src_name
-                );
-                close(pair.src_fd);
-                return true;
-            }
-            if mode & S_ISVTX as u32 != 0 {
-                eprintln!("警告：{:#?}: 文件设置了 sticky 位，已跳过", pair.src_name);
-                close(pair.src_fd);
-                return true;
-            }
-            if pair.src_st.st_nlink > 1 {
-                eprintln!("警告：{:#?}: 输入文件有多个硬链接，已跳过", pair.src_name);
-                close(pair.src_fd);
-                return true;
-            }
-        }
-
-        // 不是常规文件时等待 IO
-        if !s_isreg(pair.src_st.st_mode as u32) {
-            signals_unblock();
-            let ret = io_wait(pair, -1, true);
-            signals_block();
-
-            if ret != IoWaitRet::IoWaitMore {
-                close(pair.src_fd);
-                return true;
             }
         }
 
         // 忽略 posix_fadvise 的错误
-
-        posix_fadvise(
-            pair.src_fd,
+        let _ = sys_fs::posix_fadvise(
+            STDIN_FILENO,
             0,
             0,
             if *OPT_MODE.lock().unwrap() == OperationMode::List {
@@ -555,14 +419,174 @@ fn io_open_src_real(pair: &mut FilePair) -> bool {
             },
         );
 
-        false
+        return false;
     }
+
+    // 是否跟随符号链接
+    let follow_symlinks = *OPT_STDOUT.lock().unwrap()
+        || *OPT_FORCE.lock().unwrap()
+        || *OPT_KEEP_ORIGINAL.lock().unwrap();
+    let reg_files_only = !*OPT_STDOUT.lock().unwrap();
+
+    // open() 标志
+    let mut flags = O_RDONLY | 0 | O_NOCTTY;
+    flags |= O_NONBLOCK;
+    if !follow_symlinks {
+        flags |= O_NOFOLLOW;
+    }
+
+    // 打开文件
+    let c_name = match &pair.src_name {
+        Some(name) => CString::new(name.as_str()).unwrap(),
+        None => panic!("源文件名为空"),
+    };
+
+    match sys_fcntl::open_with_mode(&c_name, flags, 0) {
+        Ok(fd) => pair.src_fd = fd,
+        Err(err) => {
+            // EINTR 不应出现
+            let errno = err.raw_os_error().unwrap_or(0);
+            assert_ne!(errno, EINTR);
+
+            let mut was_symlink = false;
+            if errno == ELOOP && !follow_symlinks {
+                let mut st: stat = sys_fs::zeroed_stat();
+                if sys_fs::lstat(&c_name, &mut st).is_ok() && (st.st_mode & S_IFMT) == S_IFLNK {
+                    was_symlink = true;
+                }
+            }
+
+            if was_symlink {
+                message_warning(
+                    &format!(
+                        "{}: Is a symbolic link, skipping",
+                        pair.src_name.as_deref().unwrap_or("(unknown)")
+                    ),
+                    &[],
+                );
+            } else {
+                message_error(
+                    &format!(
+                        "{}: {}",
+                        pair.src_name.as_deref().unwrap_or("(unknown)"),
+                        err
+                    ),
+                    format_args!(""),
+                );
+            }
+            return true;
+        }
+    }
+
+    // 获取文件状态
+    if let Err(err) = sys_fs::fstat(pair.src_fd, &mut pair.src_st) {
+        message_error(
+            &format!(
+                "{}: {}",
+                pair.src_name.as_deref().unwrap_or("(unknown)"),
+                err
+            ),
+            format_args!(""),
+        );
+        let _ = sys_unistd::close(pair.src_fd);
+        return true;
+    }
+
+    // 检查目录
+    if (pair.src_st.st_mode & S_IFMT) == S_IFDIR {
+        message_warning(
+            &format!(
+                "{}: Is a directory, skipping",
+                pair.src_name.as_deref().unwrap_or("(unknown)")
+            ),
+            &[],
+        );
+        let _ = sys_unistd::close(pair.src_fd);
+        return true;
+    }
+
+    // 只允许常规文件
+    if reg_files_only && !((pair.src_st.st_mode & S_IFMT) == S_IFREG) {
+        message_warning(
+            &format!(
+                "{}: Not a regular file, skipping",
+                pair.src_name.as_deref().unwrap_or("(unknown)")
+            ),
+            &[],
+        );
+        let _ = sys_unistd::close(pair.src_fd);
+        return true;
+    }
+
+    // 检查特殊权限和硬链接数
+    if reg_files_only && !*OPT_FORCE.lock().unwrap() && !*OPT_KEEP_ORIGINAL.lock().unwrap() {
+        let mode = pair.src_st.st_mode;
+        if (mode & S_ISUID as u32 != 0) || (mode & S_ISGID as u32 != 0) {
+            message_warning(
+                &format!(
+                    "{}: File has setuid or setgid bit set, skipping",
+                    pair.src_name.as_deref().unwrap_or("(unknown)")
+                ),
+                &[],
+            );
+            let _ = sys_unistd::close(pair.src_fd);
+            return true;
+        }
+        if mode & S_ISVTX as u32 != 0 {
+            message_warning(
+                &format!(
+                    "{}: File has sticky bit set, skipping",
+                    pair.src_name.as_deref().unwrap_or("(unknown)")
+                ),
+                &[],
+            );
+            let _ = sys_unistd::close(pair.src_fd);
+            return true;
+        }
+        if pair.src_st.st_nlink > 1 {
+            message_warning(
+                &format!(
+                    "{}: Input file has more than one hard link, skipping",
+                    pair.src_name.as_deref().unwrap_or("(unknown)")
+                ),
+                &[],
+            );
+            let _ = sys_unistd::close(pair.src_fd);
+            return true;
+        }
+    }
+
+    // 不是常规文件时等待 IO
+    if !s_isreg(pair.src_st.st_mode as u32) {
+        signals_unblock();
+        let ret = io_wait(pair, -1, true);
+        signals_block();
+
+        if ret != IoWaitRet::IoWaitMore {
+            let _ = sys_unistd::close(pair.src_fd);
+            return true;
+        }
+    }
+
+    // 忽略 posix_fadvise 的错误
+    let _ = sys_fs::posix_fadvise(
+        pair.src_fd,
+        0,
+        0,
+        if *OPT_MODE.lock().unwrap() == OperationMode::List {
+            POSIX_FADV_RANDOM
+        } else {
+            POSIX_FADV_SEQUENTIAL
+        },
+    );
+
+    false
 }
 
 /// 打开源文件，返回 Some(FilePair) 表示成功，None 表示失败
 pub fn io_open_src(src_name: &str) -> Option<FilePair> {
     if src_name.is_empty() {
-        eprintln!("错误：文件名为空，已跳过");
+        message_error("(empty filename)", format_args!(""));
         return None;
     }
 
@@ -577,8 +601,8 @@ pub fn io_open_src(src_name: &str) -> Option<FilePair> {
         flush_needed: false,
         dest_try_sparse: false,
         dest_pending_sparse: 0,
-        src_st: unsafe { std::mem::zeroed() },
-        dest_st: unsafe { std::mem::zeroed() },
+        src_st: sys_fs::zeroed_stat(),
+        dest_st: sys_fs::zeroed_stat(),
     };
 
     // 阻塞信号
@@ -599,17 +623,14 @@ fn io_close_src(pair: &mut FilePair, success: bool) {
     if *RESTORE_STDIN_FLAGS.lock().unwrap() {
         assert!(pair.src_fd == STDIN_FILENO);
         *RESTORE_STDIN_FLAGS.lock().unwrap() = false;
-        if unsafe { fcntl(STDIN_FILENO, F_SETFL, *STDIN_FLAGS.lock().unwrap()) } == -1 {
-            eprintln!(
-                "错误：恢复标准输入状态标志失败: {}",
-                std::io::Error::last_os_error()
-            );
+        if let Err(e) = sys_fcntl::fcntl_setfl(STDIN_FILENO, *STDIN_FLAGS.lock().unwrap()) {
+            eprintln!("错误：恢复标准输入状态标志失败: {}", e);
         }
     }
 
     if pair.src_fd != STDIN_FILENO && pair.src_fd != -1 {
         // 先关闭文件再考虑删除
-        let _ = unsafe { close(pair.src_fd) };
+        let _ = sys_unistd::close(pair.src_fd);
 
         if success && !*OPT_KEEP_ORIGINAL.lock().unwrap() {
             io_unlink(
@@ -622,98 +643,95 @@ fn io_close_src(pair: &mut FilePair, success: bool) {
 
 /// 打开目标文件，返回 true 表示出错，false 表示成功
 fn io_open_dest_real(pair: &mut FilePair) -> bool {
-    unsafe {
-        if *OPT_STDOUT.lock().unwrap() || pair.src_fd == STDIN_FILENO {
-            // 输出到标准输出
-            pair.dest_name = Some("(stdout)".to_string());
-            pair.dest_fd = STDOUT_FILENO;
+    if *OPT_STDOUT.lock().unwrap() || pair.src_fd == STDIN_FILENO {
+        // 输出到标准输出
+        pair.dest_name = Some("(stdout)".to_string());
+        pair.dest_fd = STDOUT_FILENO;
 
-            *STDOUT_FLAGS.lock().unwrap() = fcntl(STDOUT_FILENO, F_GETFL);
-            if *STDOUT_FLAGS.lock().unwrap() == -1 {
-                eprintln!(
-                    "错误：获取标准输出文件状态标志失败: {}",
-                    std::io::Error::last_os_error()
-                );
+        match sys_fcntl::fcntl_getfl(STDOUT_FILENO) {
+            Ok(v) => *STDOUT_FLAGS.lock().unwrap() = v,
+            Err(e) => {
+                eprintln!("错误：获取标准输出文件状态标志失败: {}", e);
                 return true;
             }
+        }
 
-            if (*STDOUT_FLAGS.lock().unwrap() & O_NONBLOCK) == 0
-                && fcntl(
-                    STDOUT_FILENO,
-                    F_SETFL,
-                    *STDOUT_FLAGS.lock().unwrap() | O_NONBLOCK,
-                ) != -1
+        if (*STDOUT_FLAGS.lock().unwrap() & O_NONBLOCK) == 0 {
+            if sys_fcntl::fcntl_setfl(STDOUT_FILENO, *STDOUT_FLAGS.lock().unwrap() | O_NONBLOCK)
+                .is_ok()
             {
                 *RESTORE_STDOUT_FLAGS.lock().unwrap() = true;
             }
-        } else {
-            // 获取目标文件名
-            pair.dest_name = suffix_get_dest_name(pair.src_name.clone().unwrap().as_str());
-            if pair.dest_name.is_none() {
-                return true;
-            }
+        }
+    } else {
+        // 获取目标文件名
+        pair.dest_name = suffix_get_dest_name(pair.src_name.clone().unwrap().as_str());
+        if pair.dest_name.is_none() {
+            return true;
+        }
 
-            // --force 先尝试删除目标文件
-            if *OPT_FORCE.lock().unwrap() {
-                let c_dest = CString::new(pair.dest_name.as_ref().unwrap().as_str()).unwrap();
-                if unlink(c_dest.as_ptr()) != 0 && *libc::__errno_location() != ENOENT {
+        // --force 先尝试删除目标文件
+        if *OPT_FORCE.lock().unwrap() {
+            let c_dest = CString::new(pair.dest_name.as_ref().unwrap().as_str()).unwrap();
+            if let Err(e) = sys_fs::unlink(&c_dest) {
+                if e.raw_os_error().unwrap_or(0) != ENOENT {
                     eprintln!(
                         "错误：{}: 无法删除: {}",
                         pair.dest_name.as_ref().unwrap(),
-                        std::io::Error::last_os_error()
+                        e
                     );
                     return true;
                 }
             }
+        }
 
-            // 打开目标文件
-            let flags = O_WRONLY | 0 | O_NOCTTY | O_CREAT | O_EXCL | O_NONBLOCK;
-            let mode = S_IRUSR | S_IWUSR;
-            let c_dest = CString::new(pair.dest_name.as_ref().unwrap().as_str()).unwrap();
-            pair.dest_fd = open(c_dest.as_ptr(), flags, mode);
-
-            if pair.dest_fd == -1 {
-                eprintln!(
-                    "错误：{}: {}",
-                    pair.dest_name.as_ref().unwrap(),
-                    std::io::Error::last_os_error()
+        // 打开目标文件
+        let flags = O_WRONLY | 0 | O_NOCTTY | O_CREAT | O_EXCL | O_NONBLOCK;
+        let mode = (S_IRUSR | S_IWUSR) as libc::mode_t;
+        let c_dest = CString::new(pair.dest_name.as_ref().unwrap().as_str()).unwrap();
+        match sys_fcntl::open_with_mode(&c_dest, flags, mode) {
+            Ok(fd) => pair.dest_fd = fd,
+            Err(e) => {
+                message_error(
+                    &format!("{}: {}", pair.dest_name.as_ref().unwrap(), e),
+                    format_args!(""),
                 );
                 return true;
             }
         }
-
-        // 获取目标文件状态
-        if fstat(pair.dest_fd, &mut pair.dest_st) != 0 {
-            // fstat 失败，安全降级
-            pair.dest_st.st_dev = 0;
-            pair.dest_st.st_ino = 0;
-        } else if *TRY_SPARSE.lock().unwrap()
-            && *OPT_MODE.lock().unwrap() == OperationMode::Decompress
-        {
-            // 稀疏文件处理
-            if pair.dest_fd == STDOUT_FILENO {
-                if S_IFREG != pair.dest_st.st_mode {
-                    return false;
-                }
-                if *STDOUT_FLAGS.lock().unwrap() & O_APPEND != 0 {
-                    if lseek(STDOUT_FILENO, 0, SEEK_END) == -1 {
-                        return false;
-                    }
-                    let mut flags = *STDOUT_FLAGS.lock().unwrap() & !O_APPEND;
-                    if *RESTORE_STDOUT_FLAGS.lock().unwrap() {
-                        flags |= O_NONBLOCK;
-                    }
-                    if fcntl(STDOUT_FILENO, F_SETFL, flags) == -1 {
-                        return false;
-                    }
-                    *RESTORE_STDOUT_FLAGS.lock().unwrap() = true;
-                } else if lseek(STDOUT_FILENO, 0, SEEK_CUR) != pair.dest_st.st_size {
-                    return false;
-                }
-            }
-            pair.dest_try_sparse = true;
-        }
     }
+
+    // 获取目标文件状态
+    if sys_fs::fstat(pair.dest_fd, &mut pair.dest_st).is_err() {
+        // fstat 失败，安全降级
+        pair.dest_st.st_dev = 0;
+        pair.dest_st.st_ino = 0;
+    } else if *TRY_SPARSE.lock().unwrap() && *OPT_MODE.lock().unwrap() == OperationMode::Decompress
+    {
+        // 稀疏文件处理
+        if pair.dest_fd == STDOUT_FILENO {
+            if S_IFREG != pair.dest_st.st_mode {
+                return false;
+            }
+            if *STDOUT_FLAGS.lock().unwrap() & O_APPEND != 0 {
+                if sys_fs::lseek(STDOUT_FILENO, 0, SEEK_END).is_err() {
+                    return false;
+                }
+                let mut flags = *STDOUT_FLAGS.lock().unwrap() & !O_APPEND;
+                if *RESTORE_STDOUT_FLAGS.lock().unwrap() {
+                    flags |= O_NONBLOCK;
+                }
+                if sys_fcntl::fcntl_setfl(STDOUT_FILENO, flags).is_err() {
+                    return false;
+                }
+                *RESTORE_STDOUT_FLAGS.lock().unwrap() = true;
+            } else if sys_fs::lseek(STDOUT_FILENO, 0, SEEK_CUR).ok() != Some(pair.dest_st.st_size) {
+                return false;
+            }
+        }
+        pair.dest_try_sparse = true;
+    }
+
     false
 }
 
@@ -727,80 +745,74 @@ pub fn io_open_dest(pair: &mut FilePair) -> bool {
 
 /// 关闭目标文件，success 为 false 时会删除目标文件
 fn io_close_dest(pair: &mut FilePair, success: bool) -> bool {
-    unsafe {
-        // 如果 io_open_dest() 禁用了 O_APPEND，这里恢复
-        if *RESTORE_STDOUT_FLAGS.lock().unwrap() {
-            assert!(pair.dest_fd == STDOUT_FILENO);
-            *RESTORE_STDOUT_FLAGS.lock().unwrap() = false;
-            if fcntl(STDOUT_FILENO, F_SETFL, *STDOUT_FLAGS.lock().unwrap()) == -1 {
-                eprintln!(
-                    "错误：恢复标准输出 O_APPEND 标志失败: {}",
-                    std::io::Error::last_os_error()
-                );
-                return true;
-            }
-        }
-
-        if pair.dest_fd == -1 || pair.dest_fd == STDOUT_FILENO {
-            return false;
-        }
-
-        if close(pair.dest_fd) != 0 {
-            eprintln!("错误：关闭文件失败: {}", std::io::Error::last_os_error());
-            // 关闭失败，不能信任文件内容，删除之
-            if let Some(ref name) = pair.dest_name {
-                io_unlink(name, &pair.dest_st);
-            }
+    // 如果 io_open_dest() 禁用了 O_APPEND，这里恢复
+    if *RESTORE_STDOUT_FLAGS.lock().unwrap() {
+        assert!(pair.dest_fd == STDOUT_FILENO);
+        *RESTORE_STDOUT_FLAGS.lock().unwrap() = false;
+        if let Err(e) = sys_fcntl::fcntl_setfl(STDOUT_FILENO, *STDOUT_FLAGS.lock().unwrap()) {
+            eprintln!("错误：恢复标准输出 O_APPEND 标志失败: {}", e);
             return true;
         }
+    }
 
-        // 如果操作未成功，删除目标文件
-        if !success {
-            if let Some(ref name) = pair.dest_name {
-                io_unlink(name, &pair.dest_st);
-            }
+    if pair.dest_fd == -1 || pair.dest_fd == STDOUT_FILENO {
+        return false;
+    }
+
+    if let Err(e) = sys_unistd::close(pair.dest_fd) {
+        eprintln!("错误：关闭文件失败: {}", e);
+        // 关闭失败，不能信任文件内容，删除之
+        if let Some(ref name) = pair.dest_name {
+            io_unlink(name, &pair.dest_st);
+        }
+        return true;
+    }
+
+    // 如果操作未成功，删除目标文件
+    if !success {
+        if let Some(ref name) = pair.dest_name {
+            io_unlink(name, &pair.dest_st);
         }
     }
+
     false
 }
 
 /// 关闭文件对，包括处理稀疏文件、拷贝属性、关闭目标和源文件
 pub fn io_close(pair: &mut FilePair, mut success: bool) {
-    unsafe {
-        // 处理稀疏文件结尾
-        if success && pair.dest_try_sparse && pair.dest_pending_sparse > 0 {
-            // 向前 seek 到空洞末尾，写一个 0 字节
-            if lseek(pair.dest_fd, pair.dest_pending_sparse - 1, SEEK_CUR) == -1 {
-                eprintln!(
-                    "错误：创建稀疏文件时 seek 失败: {}",
-                    std::io::Error::last_os_error()
-                );
+    // 处理稀疏文件结尾
+    if success && pair.dest_try_sparse && pair.dest_pending_sparse > 0 {
+        // 向前 seek 到空洞末尾，写一个 0 字节
+        if sys_fs::lseek(pair.dest_fd, pair.dest_pending_sparse - 1, SEEK_CUR).is_err() {
+            eprintln!(
+                "错误：创建稀疏文件时 seek 失败: {}",
+                std::io::Error::last_os_error()
+            );
+            success = false;
+        } else {
+            let zero = [0u8];
+            if io_write_buf(pair, &zero, 1) {
                 success = false;
-            } else {
-                let zero = [0u8];
-                if io_write_buf(pair, &zero, 1) {
-                    success = false;
-                }
             }
         }
-
-        signals_block();
-
-        // 拷贝文件属性（仅当目标文件已打开且不是标准输出）
-        if success && pair.dest_fd != -1 && pair.dest_fd != STDOUT_FILENO {
-            io_copy_attrs(pair);
-        }
-
-        // 先关闭目标文件，失败则不删除源文件
-        if io_close_dest(pair, success) {
-            success = false;
-        }
-
-        // 关闭源文件，如操作成功且未请求保留源文件则删除源文件
-        io_close_src(pair, success);
-
-        signals_unblock();
     }
+
+    signals_block();
+
+    // 拷贝文件属性（仅当目标文件已打开且不是标准输出）
+    if success && pair.dest_fd != -1 && pair.dest_fd != STDOUT_FILENO {
+        io_copy_attrs(pair);
+    }
+
+    // 先关闭目标文件，失败则不删除源文件
+    if io_close_dest(pair, success) {
+        success = false;
+    }
+
+    // 关闭源文件，如操作成功且未请求保留源文件则删除源文件
+    io_close_src(pair, success);
+
+    signals_unblock();
 }
 
 pub fn io_fix_src_pos(pair: &mut FilePair, rewind: usize) {
@@ -808,9 +820,7 @@ pub fn io_fix_src_pos(pair: &mut FilePair, rewind: usize) {
 
     if rewind > 0 {
         // 对于不可 seek 的 fd 忽略错误
-        unsafe {
-            lseek(pair.src_fd, -(rewind as off_t), SEEK_CUR);
-        }
+        let _ = sys_fs::lseek(pair.src_fd, -(rewind as off_t), SEEK_CUR);
     }
 }
 
@@ -820,21 +830,21 @@ pub fn io_read(pair: &mut FilePair, buf: &mut IoBuf, size: usize) -> usize {
 
     let mut pos = 0;
 
-    unsafe {
-        while pos < size {
-            let amount = read(
-                pair.src_fd,
-                buf.data.as_mut_ptr().add(pos) as *mut c_void,
-                size - pos,
-            );
-
-            if amount == 0 {
+    while pos < size {
+        match sys_unistd::read(pair.src_fd, &mut buf.data[pos..size]) {
+            Ok(0) => {
                 pair.src_eof = true;
                 break;
             }
-
-            if amount == -1 {
-                let errno = *libc::__errno_location();
+            Ok(amount) => {
+                pos += amount;
+                if !pair.src_has_seen_input {
+                    pair.src_has_seen_input = true;
+                    mytime_set_flush_time();
+                }
+            }
+            Err(err) => {
+                let errno = err.raw_os_error().unwrap_or(0);
                 if errno == EINTR {
                     if *USER_ABORT.lock().unwrap() {
                         return usize::MAX;
@@ -859,19 +869,15 @@ pub fn io_read(pair: &mut FilePair, buf: &mut IoBuf, size: usize) -> usize {
                     }
                 }
 
-                let err_str = CStr::from_ptr(libc::strerror(errno)).to_string_lossy();
                 message_error(
-                    &format!("{:#?}: 读取错误: {}", pair.src_name, err_str),
+                    &format!(
+                        "{}: 读取错误: {}",
+                        pair.src_name.as_deref().unwrap_or("(unknown)"),
+                        err
+                    ),
                     format_args!(""),
                 );
                 return usize::MAX;
-            }
-
-            pos += amount as usize;
-
-            if !pair.src_has_seen_input {
-                pair.src_has_seen_input = true;
-                mytime_set_flush_time();
             }
         }
     }
@@ -886,12 +892,10 @@ pub fn io_seek_src(pair: &mut FilePair, pos: u64) -> bool {
         message_bug();
     }
 
-    let ret = unsafe { lseek(pair.src_fd, pos as off_t, SEEK_SET) };
-    if ret == -1 {
-        let errno = unsafe { *libc::__errno_location() };
-        let err_str = unsafe { CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
+    let ret = sys_fs::lseek(pair.src_fd, pos as off_t, SEEK_SET);
+    if let Err(e) = ret {
         message_error(
-            &format!("{:#?}: 定位文件出错: {}", pair.src_name, err_str),
+            &format!("{:#?}: 定位文件出错: {}", pair.src_name, e),
             format_args!(""),
         );
         return true;
@@ -926,13 +930,17 @@ pub fn io_pread(pair: &mut FilePair, buf: &mut IoBuf, size: usize, pos: u64) -> 
     false
 }
 /// 判断缓冲区是否全为0（稀疏块）
-fn is_sparse(buf: &IoBuf) -> bool {
-    assert!(IO_BUFFER_SIZE % size_of::<u64>() == 0);
+fn is_sparse(buf: &[u8]) -> bool {
+    let word_size = size_of::<u64>();
+    assert!(buf.len() % word_size == 0);
 
-    let u64_array = buf.as_u64();
-    for i in 0..u64_array.len() {
-        if u64_array[i] != 0 {
-            return false;
+    let words = buf.len() / word_size;
+    let u64_ptr = buf.as_ptr() as *const u64;
+    for i in 0..words {
+        unsafe {
+            if *u64_ptr.add(i) != 0 {
+                return false;
+            }
         }
     }
 
@@ -943,44 +951,44 @@ fn is_sparse(buf: &IoBuf) -> bool {
 fn io_write_buf(pair: &mut FilePair, buf: &[u8], mut size: usize) -> bool {
     assert!(size < usize::MAX);
 
-    let mut ptr = buf.as_ptr();
-    while size > 0 {
-        let amount = unsafe { libc::write(pair.dest_fd, ptr as *const c_void, size) };
-        if amount == -1 {
-            let errno = unsafe { *libc::__errno_location() };
-            if errno == EINTR {
-                // 用户中断
-                // if user_abort { return true; }
-                continue;
+    let mut remaining = &buf[..size];
+    while !remaining.is_empty() {
+        match sys_unistd::write(pair.dest_fd, remaining) {
+            Ok(amount) => {
+                remaining = &remaining[amount..];
             }
-            if errno == EAGAIN || errno == EWOULDBLOCK {
-                if io_wait(pair, -1, false) == IoWaitRet::IoWaitMore {
+            Err(err) => {
+                let errno = err.raw_os_error().unwrap_or(0);
+                if errno == EINTR {
                     continue;
+                }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    if io_wait(pair, -1, false) == IoWaitRet::IoWaitMore {
+                        continue;
+                    }
+                    return true;
+                }
+                if errno != EPIPE {
+                    message_error(
+                        &format!(
+                            "{}: 写入错误: {}",
+                            pair.dest_name.as_deref().unwrap_or("(unknown)"),
+                            err
+                        ),
+                        format_args!(""),
+                    );
                 }
                 return true;
             }
-            if errno != EPIPE {
-                let err_str = unsafe { CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-                message_error(
-                    &format!(
-                        "{}: 写入错误: {}",
-                        pair.dest_name.as_deref().unwrap_or("(unknown)"),
-                        err_str
-                    ),
-                    format_args!(""),
-                );
-            }
-            return true;
         }
-        ptr = unsafe { ptr.add(amount as usize) };
-        size -= amount as usize;
     }
     false
 }
 
 /// 写数据到目标文件，支持稀疏文件优化
-pub fn io_write(pair: &mut FilePair, buf: &IoBuf, size: usize) -> bool {
+pub fn io_write(pair: &mut FilePair, buf: &[u8], size: usize) -> bool {
     assert!(size <= IO_BUFFER_SIZE);
+    let buf = &buf[..size];
 
     if pair.dest_try_sparse {
         // 检查是否为稀疏块（全为0），如果是则只记录空洞长度
@@ -996,16 +1004,13 @@ pub fn io_write(pair: &mut FilePair, buf: &IoBuf, size: usize) -> bool {
 
         // 非稀疏块，如果有待处理的空洞，先跳过
         if pair.dest_pending_sparse > 0 {
-            let seek_ret = unsafe { lseek(pair.dest_fd, pair.dest_pending_sparse, SEEK_CUR) };
-            if seek_ret == -1 {
-                let err_str = unsafe {
-                    CStr::from_ptr(libc::strerror(*libc::__errno_location())).to_string_lossy()
-                };
+            let seek_ret = sys_fs::lseek(pair.dest_fd, pair.dest_pending_sparse, SEEK_CUR);
+            if let Err(e) = seek_ret {
                 message_error(
                     &format!(
                         "{}: 创建稀疏文件时 seek 失败: {}",
                         pair.dest_name.as_deref().unwrap_or("(unknown)"),
-                        err_str
+                        e
                     ),
                     format_args!(""),
                 );
@@ -1015,5 +1020,5 @@ pub fn io_write(pair: &mut FilePair, buf: &IoBuf, size: usize) -> bool {
         }
     }
 
-    io_write_buf(pair, &buf.data[..size], size)
+    io_write_buf(pair, buf, size)
 }
