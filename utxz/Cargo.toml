@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 common = { path = "../common" }
 liblzma = { path = "../liblzma" }
+utxz_sys = { package = "utxz-sys", path = "../utxz_sys" }
 libc = "0.2.173"
 atty = "0.2.14"
 lazy_static = "1.4"
