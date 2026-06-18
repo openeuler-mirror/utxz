@@ -15,7 +15,10 @@ use crate::coder::FormatType;
 use crate::coder::OperationMode;
 use crate::coder::OPT_FORMAT;
 use crate::coder::OPT_MODE;
+use crate::message::{message_warning, vmessage, MessageVerbosity};
+use crate::set_exit_status;
 use crate::util::xstrdup;
+use crate::ExitStatusType;
 
 /// 全局变量：自定义后缀
 // static mut CUSTOM_SUFFIX: Option<String> = None;
@@ -116,7 +119,12 @@ fn uncompressed_name(src_name: &str, src_len: usize) -> Option<String> {
     }
 
     if new_len == 0 {
-        println!("{}: Filename has an unknown suffix, skipping", src_name);
+        vmessage(
+            MessageVerbosity::Warning,
+            &format!("{}: Filename has an unknown suffix, skipping", src_name),
+            format_args!(""),
+        );
+        set_exit_status(ExitStatusType::EWarning);
         return None;
     }
 
@@ -131,7 +139,15 @@ fn uncompressed_name(src_name: &str, src_len: usize) -> Option<String> {
 /// 显示后缀相关的警告消息
 /// 在compressed_name()中多处需要此消息，所以将其放入单独的函数
 fn msg_suffix(src_name: &str, suffix: &str) {
-    println!("警告: {}: 文件已经有`{}`后缀，跳过", src_name, suffix);
+    vmessage(
+        MessageVerbosity::Warning,
+        &format!(
+            "{}: File already has `{}' suffix, skipping",
+            src_name, suffix
+        ),
+        format_args!(""),
+    );
+    set_exit_status(ExitStatusType::EWarning);
 }
 
 /// 将后缀添加到src_name
