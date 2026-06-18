@@ -68,7 +68,13 @@ pub fn hardware_threads_set(n: u32) {
         hw.use_mt_mode_with_one_thread = true;
         hw.threads_max = 1;
     } else {
-        hw.threads_max = n;
+        // cap 到实际 CPU 线程数，与 xz 行为一致
+        let max_threads = lzma_cputhreads();
+        hw.threads_max = if max_threads > 0 && n > max_threads {
+            max_threads
+        } else {
+            n
+        };
     }
 }
 
