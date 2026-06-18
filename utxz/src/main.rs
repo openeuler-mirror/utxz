@@ -11,6 +11,8 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
+#![allow(warnings)]
+#![allow(clippy::all)]
 
 mod args;
 mod coder;
@@ -31,7 +33,6 @@ use common::{tuklib_exit, PROGNAME};
 use file_io::io_init;
 use hardware::hardware_init;
 use lazy_static::lazy_static;
-use libc::{fclose, strcmp};
 use list::{list_file, list_totals};
 use message::{
     message_error, message_fatal, message_init, message_set_files, message_try_help,
@@ -96,7 +97,10 @@ fn read_name(args: &mut ArgsInfo) -> Option<String> {
         let file = match args.files_file.as_mut() {
             Some(f) => f,
             None => {
-                eprintln!("{:#?}: 文件句柄不存在", args.files_name);
+                eprintln!(
+                    "{}: 文件句柄不存在",
+                    args.files_name.as_deref().unwrap_or("(unknown)")
+                );
                 return None;
             }
         };
@@ -106,7 +110,10 @@ fn read_name(args: &mut ArgsInfo) -> Option<String> {
             Ok(0) => {
                 // 遇到文件结尾
                 if !name.is_empty() {
-                    eprintln!("{:#?}: 读取文件名时遇到意外的输入结束", args.files_name);
+                    eprintln!(
+                        "{}: 读取文件名时遇到意外的输入结束",
+                        args.files_name.as_deref().unwrap_or("(unknown)")
+                    );
                 }
                 return None;
             }
@@ -123,8 +130,8 @@ fn read_name(args: &mut ArgsInfo) -> Option<String> {
                 // 如果读取到 '\0' 字符，而分隔符不是 '\0'，则报错
                 if c == 0 {
                     eprintln!(
-                        "{:#?}: 读取文件名时发现空字符；也许你应该用 \"--files0\" 而不是 \"--files\"",
-                        args.files_name
+                        "{}: 读取文件名时发现空字符；也许你应该用 \"--files0\" 而不是 \"--files\"",
+                        args.files_name.as_deref().unwrap_or("(unknown)")
                     );
                     return None;
                 }
@@ -138,7 +145,11 @@ fn read_name(args: &mut ArgsInfo) -> Option<String> {
                 continue;
             }
             Err(e) => {
-                eprintln!("{:#?}: 读取文件名时出错: {}", args.files_name, e);
+                eprintln!(
+                    "{}: 读取文件名时出错: {}",
+                    args.files_name.as_deref().unwrap_or("(unknown)"),
+                    e
+                );
                 return None;
             }
         }
@@ -151,9 +162,10 @@ fn read_name(args: &mut ArgsInfo) -> Option<String> {
 
 /// 初始化全局程序名
 fn tuklib_progname_init() {
-    // 获取命令行参数的第一个（程序名）
+    // 获取命令行参数的第一个（程序名），只取 basename 部分
     if let Some(name) = std::env::args().next() {
-        *PROGNAME.lock().unwrap() = name;
+        let basename = name.rsplit('/').next().unwrap_or(&name);
+        *PROGNAME.lock().unwrap() = basename.to_string();
     }
 }
 
@@ -243,8 +255,8 @@ fn main() {
                 continue;
             }
 
-            // Replace the "-" with a special pointer for stdin
-            args_info.arg_names[i as usize] = "stdin".to_string();
+            // Replace the "-" with the special stdin filename so io_open_src can match it
+            args_info.arg_names[i as usize] = STDIN_FILENAME.to_string();
         }
 
         // Call the run function (compression or decompression)
