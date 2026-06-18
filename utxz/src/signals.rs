@@ -8,8 +8,8 @@ use std::{ptr, sync::Mutex};
 
 use common::mythread_sigmask;
 use lazy_static::lazy_static;
-use libc::{raise, sigaction, sigaddset, sigemptyset, sigfillset, sighandler_t, sigset_t};
-use nix::errno::errno;
+use libc::{sigaction, sighandler_t, sigset_t};
+use utxz_sys::signal as sys_signal;
 
 use crate::{
     file_io::io_write_to_user_abort_pipe,
@@ -21,9 +21,7 @@ lazy_static! {
     pub static ref EXIT_SIGNAL:Mutex<i32> = Mutex::new(0);
     // pub static ref HOOKED_SIGNALS:Mutex<sigset_t> = Mutex::new(0);
     pub static ref HOOKED_SIGNALS: Mutex<sigset_t> = {
-        let mut sigset: sigset_t = unsafe { std::mem::zeroed() }; // 初始化为零
-        unsafe { sigemptyset(&mut sigset) }; // 清空信号集
-        Mutex::new(sigset)
+        Mutex::new(sys_signal::sigset_empty())
     };
 
     pub static ref SIGNALS_ARE_INITIALIZED:Mutex<bool> = Mutex::new(false);
@@ -45,85 +43,75 @@ pub fn signals_init() {
         libc::SIGXCPU,
         libc::SIGXFSZ,
     ];
-    unsafe {
-        sigemptyset(&mut *HOOKED_SIGNALS.lock().unwrap());
-        for sig in sigs.iter() {
-            sigaddset(&mut *HOOKED_SIGNALS.lock().unwrap(), *sig);
+
+    // 构造 hooked signal set
+    let mut set = sys_signal::sigset_empty();
+    for sig in sigs {
+        if sys_signal::sigaddset(&mut set, sig).is_err() {
+            message_signal_handler();
         }
-
-        for i in MESSAGE_PROGRESS_SIGS {
-            if *i != 0 {
-                sigaddset(&mut *HOOKED_SIGNALS.lock().unwrap(), *i);
-            }
+    }
+    for &sig in MESSAGE_PROGRESS_SIGS {
+        if sig != 0 && sys_signal::sigaddset(&mut set, sig).is_err() {
+            message_signal_handler();
         }
+    }
+    *HOOKED_SIGNALS.lock().unwrap() = set;
 
-        let mut my_sa: sigaction = std::mem::zeroed();
-        my_sa.sa_mask = *HOOKED_SIGNALS.lock().unwrap();
-        my_sa.sa_flags = 0;
-        my_sa.sa_sigaction = signal_handler as sighandler_t;
+    let mut my_sa: sigaction = sys_signal::zeroed_sigaction();
+    my_sa.sa_mask = *HOOKED_SIGNALS.lock().unwrap();
+    my_sa.sa_flags = 0;
+    my_sa.sa_sigaction = signal_handler as sighandler_t;
 
-        for i in sigs.iter() {
-            let mut old: sigaction = std::mem::zeroed();
-            if sigaction(*i, std::ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_IGN {
+    for sig in sigs {
+        if let Ok(old) = sys_signal::sigaction_get(sig) {
+            if old.sa_sigaction == libc::SIG_IGN {
                 continue;
             }
-            if sigaction(*i, &my_sa, 0 as *mut sigaction) != 0 {
-                message_signal_handler();
-            }
         }
 
-        *SIGNALS_ARE_INITIALIZED.lock().unwrap() = true;
+        if sys_signal::sigaction_set(sig, &my_sa).is_err() {
+            message_signal_handler();
+        }
     }
+
+    *SIGNALS_ARE_INITIALIZED.lock().unwrap() = true;
 }
 
 pub fn signals_block() {
-    unsafe {
-        if *SIGNALS_ARE_INITIALIZED.lock().unwrap() {
-            *SIGNALS_BLOCK_COUNT.lock().unwrap() += 1;
-            if *SIGNALS_BLOCK_COUNT.lock().unwrap() == 0 {
-                mythread_sigmask(libc::SIG_BLOCK, Some(&HOOKED_SIGNALS.lock().unwrap()), None);
-            }
+    if *SIGNALS_ARE_INITIALIZED.lock().unwrap() {
+        *SIGNALS_BLOCK_COUNT.lock().unwrap() += 1;
+        if *SIGNALS_BLOCK_COUNT.lock().unwrap() == 0 {
+            mythread_sigmask(libc::SIG_BLOCK, Some(&HOOKED_SIGNALS.lock().unwrap()), None);
         }
     }
 }
 
 pub fn signals_unblock() {
-    unsafe {
-        if *SIGNALS_ARE_INITIALIZED.lock().unwrap() {
-            assert!(*SIGNALS_BLOCK_COUNT.lock().unwrap() > 0);
-            if *SIGNALS_BLOCK_COUNT.lock().unwrap() == 1 {
-                // 模拟解除信号阻塞
-                let saved_errno = std::io::Error::last_os_error();
-                mythread_sigmask(
-                    libc::SIG_UNBLOCK,
-                    Some(&HOOKED_SIGNALS.lock().unwrap()),
-                    None,
-                );
-                // 恢复 errno
-                //*libc::__errno_location() = saved_errno;
-            }
-            *SIGNALS_BLOCK_COUNT.lock().unwrap() -= 1;
+    if *SIGNALS_ARE_INITIALIZED.lock().unwrap() {
+        assert!(*SIGNALS_BLOCK_COUNT.lock().unwrap() > 0);
+        if *SIGNALS_BLOCK_COUNT.lock().unwrap() == 1 {
+            // 模拟解除信号阻塞
+            let _saved_errno = std::io::Error::last_os_error();
+            mythread_sigmask(
+                libc::SIG_UNBLOCK,
+                Some(&HOOKED_SIGNALS.lock().unwrap()),
+                None,
+            );
         }
+        *SIGNALS_BLOCK_COUNT.lock().unwrap() -= 1;
     }
 }
 
 pub fn signals_exit() {
-    unsafe {
-        let sig = *EXIT_SIGNAL.lock().unwrap();
-        if sig != 0 {
-            // 在这里我们模拟不同平台的信号处理行为
-
-            {
-                // Linux / Unix 处理方式
-                let mut sa: sigaction = std::mem::zeroed();
-                sa.sa_sigaction = libc::SIG_DFL;
-                sigfillset(&mut sa.sa_mask);
-                sa.sa_flags = 0;
-                // 设置默认处理器
-                libc::sigaction(sig, &sa, ptr::null_mut());
-                // 发送信号
-                raise(sig);
-            }
-        }
+    let sig = *EXIT_SIGNAL.lock().unwrap();
+    if sig != 0 {
+        // Linux / Unix 处理方式
+        let mut sa: sigaction = sys_signal::zeroed_sigaction();
+        sa.sa_sigaction = libc::SIG_DFL;
+        let _ = sys_signal::sigfillset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        let _ = sys_signal::sigaction_set(sig, &sa);
+        let _ = sys_signal::raise(sig);
     }
 }
