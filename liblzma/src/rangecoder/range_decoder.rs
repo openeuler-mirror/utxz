@@ -20,7 +20,7 @@ pub struct LzmaRangeDecoder {
 
 pub fn rc_read_init(
     rc: &mut LzmaRangeDecoder,
-    in_: &Vec<u8>,
+    in_: &[u8],
     in_pos: &mut usize,
     in_size: usize,
 ) -> LzmaRet {
