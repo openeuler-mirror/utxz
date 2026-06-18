@@ -7,7 +7,7 @@
 #![warn(unused_must_use)]
 use common::{tuklib_exit, PROGNAME};
 use lazy_static::lazy_static;
-use libc::{strerror, ENOMEM};
+use libc::ENOMEM;
 use liblzma::api::{LzmaFilter, LzmaRet, LzmaStream, LZMA_VERSION};
 use liblzma::common::{lzma_get_progress, lzma_version_number, lzma_version_string};
 use signal_hook::consts::signal::SIGALRM;
@@ -27,6 +27,7 @@ use crate::signals::{signals_block, signals_unblock};
 use crate::util::{round_up_to_mib, uint64_to_str};
 use crate::{set_exit_status, ExitStatusType, E_ERROR};
 use signal_hook::consts::signal::SIGUSR1;
+use utxz_sys::unistd as sys_unistd;
 
 /// 输出详细程度
 #[derive(PartialEq, PartialOrd, Clone)]
@@ -219,9 +220,9 @@ pub fn message_progress_start(strm: &mut LzmaStream, is_passthru: bool, in_size:
         // 延迟1秒后显示第一个进度信息
         #[cfg(unix)]
         {
-            unsafe { libc::alarm(0) };
+            sys_unistd::alarm(0);
             PROGRESS_NEEDS_UPDATING.store(false, Ordering::SeqCst);
-            unsafe { libc::alarm(1) };
+            sys_unistd::alarm(1);
         }
         #[cfg(not(unix))]
         {
@@ -509,8 +510,8 @@ pub fn message_progress_update() {
     {
         PROGRESS_ACTIVE.store(true, Ordering::SeqCst);
         #[cfg(unix)]
-        unsafe {
-            libc::alarm(1); // 1 秒后再次触发进度更新
+        {
+            sys_unistd::alarm(1); // 1 秒后再次触发进度更新
         }
     } else {
         // 否则，打印换行符以分隔进度信息
@@ -640,7 +641,7 @@ pub fn message_progress_end(success: bool) {
 //         .to_string();
 // }
 /// 内部消息打印函数 (可变参数版本)
-fn vmessage(verbosity: MessageVerbosity, fmt: &str, args: std::fmt::Arguments) {
+pub fn vmessage(verbosity: MessageVerbosity, fmt: &str, args: std::fmt::Arguments) {
     if verbosity <= message_verbosity_get() {
         signals_block();
 
@@ -649,10 +650,15 @@ fn vmessage(verbosity: MessageVerbosity, fmt: &str, args: std::fmt::Arguments) {
 
         // 打印程序名前缀 (国际化处理)
         // 注意：法语等语言需要在冒号前加空格
-        write!(io::stderr(), "{:#?}: ", PROGNAME.lock().unwrap());
+        write!(io::stderr(), "{}: ", PROGNAME.lock().unwrap());
 
         // 打印实际消息内容
-        write!(io::stderr(), "{}", args).unwrap();
+        let rendered_args = args.to_string();
+        if rendered_args.is_empty() {
+            write!(io::stderr(), "{}", fmt).unwrap();
+        } else {
+            write!(io::stderr(), "{}", rendered_args).unwrap();
+        }
         writeln!(io::stderr()).unwrap();
 
         signals_unblock();
@@ -726,11 +732,7 @@ pub fn message_strm(code: LzmaRet) -> &'static str {
     match code {
         LzmaRet::NoCheck => "未进行完整性检查；未验证文件完整性",
         LzmaRet::UnsupportedCheck => "不支持的完整性检查类型；未验证文件完整性",
-        LzmaRet::MemError => unsafe {
-            std::ffi::CStr::from_ptr(strerror(ENOMEM))
-                .to_str()
-                .unwrap_or("内存不足")
-        },
+        LzmaRet::MemError => "内存不足",
         LzmaRet::MemlimitError => "已达到内存使用限制",
         LzmaRet::FormatError => "文件格式无法识别",
         LzmaRet::OptionsError => "不支持的选项",
@@ -820,7 +822,7 @@ pub fn message_try_help() {
     message(
         MessageVerbosity::Warning,
         "尝试 `{} --help` 获取更多信息。",
-        format_args!("{:#?}: ", PROGNAME.lock().unwrap()),
+        format_args!("{}", PROGNAME.lock().unwrap()),
     );
 }
 
@@ -856,135 +858,21 @@ pub fn message_version() {
 /// - `long_help`: 是否显示详细帮助信息
 pub fn message_help(long_help: bool) {
     // 打印基本用法信息
-    println!("用法: {:#?} [选项]... [文件]...", *PROGNAME.lock().unwrap());
-    println!("以 .utxz 格式压缩或解压文件\n");
-
-    // 如果显示详细帮助，打印额外说明
-    if long_help {
-        println!("长选项的强制参数对短选项也是强制的。\n");
-        println!("操作模式:\n");
-    }
+    println!("用法: {} [选项]... [文件]...", *PROGNAME.lock().unwrap());
+    println!("以 .xz 格式压缩或解压文件\n");
 
     // 打印基本操作选项
     println!(
         "{:>4}-z, --compress     强制压缩\n\
          {:>4}-d, --decompress   强制解压\n\
-         {:>4}-t, --test         测试压缩文件完整性\n\
-         {:>4}-l, --list         列出关于 .xz 文件的信息",
-        "", "", "", ""
+         {:>4}-f, --force        强制覆盖输出文件和(解)压缩链接\n\
+         {:>4}-l, --list         列出关于 .xz 文件的信息\n\
+         {:>4}-T, --threads N   使用 N 个线程进行压缩（缺省：1）\n\
+         {:>4}                    -T0 使用系统所有 CPU 线程",
+        "", "", "", "", "", ""
     );
 
-    if long_help {
-        println!("\n操作修饰符:\n");
-        println!(
-            "{:>4}-k, --keep          保留输入文件(不删除)\n\
-              {:>4}-f, --force         强制覆盖输出文件和(解)压缩链接\n\
-             {:>4}-c, --stdout        写入标准输出且不删除输入文件",
-            "", "", ""
-        );
-
-        // 打印额外选项
-        println!(
-            "{:>4}--single-stream 仅解压第一个流，静默忽略可能的剩余输入数据\n\
-             {:>4}--no-sparse       解压时不创建稀疏文件\n\
-             {:>4}-S, --suffix=.SUF 对压缩文件使用后缀 `.SUF`\n\
-             {:>4}--files[=文件]    从文件读取要处理的文件名；如果省略文件，则从标准输入读取\n\
-             {:>4}--files0[=文件]   类似 --files 但使用空字符作为终止符",
-            "", "", "", "", ""
-        );
-
-        println!("\n基本文件格式和压缩选项:\n");
-        println!(
-            "{:>4}-F, --format=格式   要编码或解码的文件格式: `auto`(默认), `xz`, `lzma`, `lzip`, `raw`\n\
-             {:>4}-C, --check=检查   完整性检查类型: `none`, `crc32`, `crc64`(默认), `sha256`\n\
-             {:>4}--ignore-check    解压时不验证完整性检查",
-            "", "", ""
-        );
-    }
-
-    // 打印压缩预设选项
-    println!(
-        "{:>4}-0 ... -9           压缩预设(默认6); 使用7-9前考虑压缩器和解压器内存使用!\n\
-         {:>4}-e, --extreme       尝试使用更多CPU时间提高压缩率(不影响解压内存需求)\n\
-         {:>4}-T, --threads=数量  最多使用NUM个线程(默认1); 设为0使用所有CPU核心",
-        "", "", ""
-    );
-
-    if long_help {
-        println!(
-            "{:>4}--block-size=大小 每SIZE字节输入后开始新的.xz块(用于线程压缩)\n\
-             {:>4}--block-list=大小列表 在给定的未压缩数据间隔后开始新的.xz块\n\
-             {:>4}--flush-timeout=超时 压缩时，如果自上次刷新后超过TIMEOUT毫秒且读取更多输入会阻塞，则刷新所有待处理数据",
-             "", "", ""
-        );
-
-        println!(
-            "{:>4}--memlimit-compress=限制\n\
-             {:>4}--memlimit-decompress=限制\n\
-             {:>4}--memlimit-mt-decompress=限制\n\
-             {:>4}-M, --memlimit=限制 设置压缩/解压/线程解压的内存使用限制(字节/RAM百分比/0表示默认)",
-            "", "", "", ""
-        );
-
-        println!(
-            "{:>4}--no-adjust     如果压缩设置超过内存限制，报错而不调整设置",
-            ""
-        );
-
-        println!("\n自定义压缩过滤器链(预设的替代方案):");
-        println!(
-            "{:>4}--lzma1[=选项]      LZMA1或LZMA2; 选项是零个或多个以下设置的逗号分隔列表:\n\
-             {:>4}--lzma2[=选项]      预设=预设值(0-9[e]), 字典=大小(4KiB-1536MiB;8MiB)\n\
-             {:>4}                    lc=数量(0-4;3), lp=数量(0-4;0), pb=数量(0-4;2)\n\
-             {:>4}                    模式=模式(快速,普通), nice=长度(2-273;64)\n\
-             {:>4}                    mf=名称(hc3,hc4,bt2,bt3,bt4;bt4), depth=数量(0=自动)",
-            "", "", "", "", ""
-        );
-
-        println!(
-            "{:>4}--x86[=选项]        x86 BCJ过滤器(32位和64位)\n\
-             {:>4}--arm[=选项]        ARM BCJ过滤器\n\
-             {:>4}--armthumb[=选项]   ARM-Thumb BCJ过滤器\n\
-             {:>4}--arm64[=选项]      ARM64 BCJ过滤器\n\
-             {:>4}--powerpc[=选项]    PowerPC BCJ过滤器(仅大端)\n\
-             {:>4}--ia64[=选项]       IA-64(Itanium) BCJ过滤器\n\
-             {:>4}--sparc[=选项]      SPARC BCJ过滤器\n\
-             {:>4}                   所有BCJ过滤器的有效选项: start=偏移量(默认0)",
-            "", "", "", "", "", "", "", "",
-        );
-
-        println!(
-            "{:>4}--delta[=选项]      Delta过滤器; 有效选项: dist=距离(1-256;1)",
-            ""
-        );
-    }
-
-    // 打印其他选项
-    println!(
-        "{:>4}-q, --quiet         抑制警告; 指定两次也抑制错误\n\
-         {:>4}-v, --verbose       详细输出; 指定两次更详细",
-        "", ""
-    );
-
-    if long_help {
-        println!(
-            "{:>4}-Q, --no-warn       使警告不影响退出状态\n\
-             {:>4}--robot           使用机器可解析的消息(适合脚本)",
-            "", ""
-        );
-        println!(
-            "{:>4}--info-memory   显示RAM总量和当前内存使用限制并退出\n\
-             {:>4}-h, --help        显示简短帮助(仅基本选项)\n\
-             {:>4}-H, --long-help   显示此详细帮助并退出",
-            "", "", ""
-        );
-    } else {
-        println!(
-            "{:>4}-h, --help        显示此简短帮助并退出\n\
-            {:>4}-H, --long-help   显示详细帮助(包括高级选项)",
-            "", ""
-        );
-    }
+    println!("{:>4}-h, --help        显示此简短帮助并退出", "");
 
     println!(
         "{:>4}-V, --version     显示版本号并退出\n\n\
@@ -992,12 +880,12 @@ pub fn message_help(long_help: bool) {
         "", ""
     );
 
-    // 打印错误报告信息
-    println!("报告错误至 <{}> (英文或芬兰文)", "utxz-bugs@example.com");
-    println!(
-        "{} 主页: <{}>",
-        "UTXZ Utils", "https://github.com/utxz/utxz"
-    );
+    // // 打印错误报告信息
+    // println!("报告错误至 <{}> (英文或芬兰文)", "utxz-bugs@example.com");
+    // println!(
+    //     "{} 主页: <{}>",
+    //     "UTXZ Utils", "https://github.com/utxz/utxz"
+    // );
 
     // 根据详细程度决定退出状态
     tuklib_exit(
