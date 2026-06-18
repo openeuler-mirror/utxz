@@ -176,6 +176,7 @@ fn parse_block_list(str_const: &str) {
 }
 
 /// 解析命令行参数
+/// 解析命令行参数
 pub fn parse_real(args: &mut ArgsInfo) -> ArgMatches {
     let commands = Command::new("utxz")
         .version("1.0")
@@ -183,186 +184,55 @@ pub fn parse_real(args: &mut ArgsInfo) -> ArgMatches {
         .about("A Rust implementation of utxz")
         .disable_help_flag(true)
         .disable_version_flag(true)
-        .trailing_var_arg(true) // 允许接收额外的位置参数
+        .trailing_var_arg(true)
         .arg(
             Arg::new("compress")
                 .short('z')
                 .long("compress")
-                .action(ArgAction::Append) // 每次出现都追加
-                .num_args(0..) // 接受0或多个参数
-                .value_name("FILES..."), // 参数名
-                                         // .help("压缩指定的文件"),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("decompress")
                 .short('d')
                 .long("decompress")
-                .action(ArgAction::Append)
-                .num_args(0..),
-        )
-        .arg(
-            Arg::new("test")
-                .short('t')
-                .long("test")
-                .action(ArgAction::SetTrue), // .help("测试文件完整性"),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("list")
                 .short('l')
                 .long("list")
-                .action(ArgAction::Append) // .help("列出文件信息"),
-                .num_args(1..),
-        )
-        // 操作修饰符
-        .arg(
-            Arg::new("keep")
-                .short('k')
-                .long("keep")
-                .action(ArgAction::SetTrue), // .help("保留原始文件"),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("force")
                 .short('f')
                 .long("force")
-                .action(ArgAction::SetTrue), // .help("强制覆盖文件"),
-        )
-        .arg(
-            Arg::new("stdout")
-                .short('c')
-                .long("stdout")
-                .action(ArgAction::SetTrue), // .help("输出到标准输出"),
-        )
-        .arg(
-            Arg::new("single-stream")
-                .long("single-stream")
-                .action(ArgAction::SetTrue), // .help("单流模式"),
-        )
-        .arg(
-            Arg::new("no-sparse")
-                .long("no-sparse")
-                .action(ArgAction::SetTrue), // .help("禁用稀疏文件处理"),
-        )
-        .arg(
-            Arg::new("suffix")
-                .short('S')
-                .long("suffix")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置后缀名"),
-        )
-        .arg(
-            Arg::new("files")
-                .long("files")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("从文件读取输入"),
-        )
-        // 基本压缩设置
-        .arg(
-            Arg::new("format")
-                .short('F')
-                .long("format")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置文件格式"),
-        )
-        .arg(
-            Arg::new("check")
-                .short('C')
-                .long("check")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置校验类型"),
-        )
-        .arg(
-            Arg::new("ignore-check")
-                .long("ignore-check")
-                .action(ArgAction::SetTrue), // .help("忽略校验"),
-        )
-        .arg(
-            Arg::new("block-size")
-                .long("block-size")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置块大小"),
-        )
-        .arg(
-            Arg::new("block-list")
-                .long("block-list")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置块列表"),
-        )
-        .arg(
-            Arg::new("memlimit-compress")
-                .long("memlimit-compress")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置压缩内存限制"),
-        )
-        .arg(
-            Arg::new("memlimit-decompress")
-                .long("memlimit-decompress")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置解压内存限制"),
-        )
-        .arg(
-            Arg::new("memlimit-mt-decompress")
-                .long("memlimit-mt-decompress")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置多线程解压内存限制"),
-        )
-        .arg(
-            Arg::new("memlimit")
-                .short('M')
-                .long("memlimit")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置内存限制"),
-        )
-        .arg(Arg::new("no-adjust").long("no-adjust").help("禁用自动调整"))
-        .arg(
-            Arg::new("threads")
-                .short('T')
-                .long("threads")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置线程数"),
-        )
-        .arg(
-            Arg::new("flush-timeout")
-                .long("flush-timeout")
-                .num_args(1)
-                .action(ArgAction::SetTrue), // .help("设置刷新超时"),
-        )
-        // 其他选项
-        .arg(Arg::new("quiet").short('q').long("quiet").help("静默模式"))
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .action(ArgAction::SetTrue), // .help("详细模式"),
-        )
-        .arg(
-            Arg::new("no-warn")
-                .short('Q')
-                .long("no-warn")
-                .action(ArgAction::SetTrue), // .help("禁用警告"),
-        )
-        .arg(Arg::new("robot").long("robot").help("机器人模式"))
-        .arg(
-            Arg::new("info-memory")
-                .long("info-memory")
-                .action(ArgAction::SetTrue), // .help("显示内存信息"),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("help")
                 .short('h')
                 .long("help")
-                .action(ArgAction::SetTrue), // .help("显示帮助信息"),
-        )
-        .arg(
-            Arg::new("long-help")
-                .short('H')
-                .long("long-help")
-                .action(ArgAction::SetTrue), // .help("显示详细帮助信息"),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("version")
                 .short('V')
                 .long("version")
-                .action(ArgAction::SetTrue), // .help("显示版本信息"),
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("threads")
+                .short('T')
+                .long("threads")
+                .action(ArgAction::Set)
+                .value_name("NUM"),
+        )
+        .arg(
+            Arg::new("files")
+                .action(ArgAction::Append)
+                .num_args(0..)
+                .value_name("FILE"),
         );
 
     let matches: clap::ArgMatches = match commands.try_get_matches() {
@@ -375,112 +245,40 @@ pub fn parse_real(args: &mut ArgsInfo) -> ArgMatches {
     };
 
     // 处理参数
-    if matches.contains_id("compress") {
-        // println!("compress mode");
+    if matches.get_flag("compress") {
         set_opt_mode(OperationMode::Compress);
-
-        // 获取 compress 后面的所有参数
-        if let Some(files) = matches.get_many::<String>("compress") {
-            args.arg_names = files.map(|s| s.to_string()).collect();
-            args.arg_count = args.arg_names.len() as u32;
-        } else {
-            args.arg_names = vec!["-".to_string()];
-            args.arg_count = 1;
-        }
     }
-    if matches.contains_id("decompress") {
+    if matches.get_flag("decompress") {
         set_opt_mode(OperationMode::Decompress);
-        if let Some(files) = matches.get_many::<String>("decompress") {
-            args.arg_names = files.map(|s| s.to_string()).collect();
-            args.arg_count = args.arg_names.len() as u32;
-        } else {
-            args.arg_names = vec!["-".to_string()];
-            args.arg_count = 1;
-        }
     }
-    if matches.get_flag("test") {
-        set_opt_mode(OperationMode::Test);
-    }
-    if matches.contains_id("list") {
+
+    if matches.get_flag("list") {
         set_opt_mode(OperationMode::List);
-        // 获取 compress 后面的所有参数
-        if let Some(files) = matches.get_many::<String>("list") {
-            args.arg_names = files.map(|s| s.to_string()).collect();
-            args.arg_count = args.arg_names.len() as u32;
-        } else {
-            args.arg_names = vec!["-".to_string()];
-            args.arg_count = 1;
-        }
     }
 
-    if matches.get_flag("force") {
-        *OPT_FORCE.lock().unwrap() = true;
+    // 从 files 位置参数获取文件列表
+    if let Some(files) = matches.get_many::<String>("files") {
+        args.arg_names = files.map(|s| s.to_string()).collect();
+        args.arg_count = args.arg_names.len() as u32;
+    } else {
+        args.arg_names = vec!["-".to_string()];
+        args.arg_count = 1;
     }
 
-    if matches.get_flag("long-help") {
-        message_help(true);
-    }
     if matches.get_flag("help") {
         message_help(false);
     }
     if matches.get_flag("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     }
+    if matches.get_flag("force") {
+        *OPT_FORCE.lock().unwrap() = true;
+    }
 
-    // 处理内存限制
-    // if let Some(memlimit) = matches
-    //     .get_one::<String>("memlimit-compress")
-    //     .map(String::as_str)
-    // {
-    //     parse_memlimit(
-    //         "memlimit-compress",
-    //         "memlimit-compress%",
-    //         memlimit,
-    //         true,
-    //         false,
-    //         false,
-    //     );
-    // }
-    // if let Some(memlimit) = matches
-    //     .get_one::<String>("memlimit-decompress")
-    //     .map(String::as_str)
-    // {
-    //     parse_memlimit(
-    //         "memlimit-decompress",
-    //         "memlimit-decompress%",
-    //         memlimit,
-    //         false,
-    //         true,
-    //         false,
-    //     );
-    // }
-    // if let Some(memlimit) = matches
-    //     .get_one::<String>("memlimit-mt-decompress")
-    //     .map(String::as_str)
-    // {
-    //     parse_memlimit(
-    //         "memlimit-mt-decompress",
-    //         "memlimit-mt-decompress%",
-    //         memlimit,
-    //         false,
-    //         false,
-    //         true,
-    //     );
-    // }
-    // if let Some(memlimit) = matches.get_one::<String>("memlimit").map(String::as_str) {
-    //     parse_memlimit("memlimit", "memlimit%", memlimit, true, true, true);
-    // }
-
-    // // 处理线程数
-    // if let Some(threads) = matches.get_one::<String>("threads").map(String::as_str) {
-    //     let t = str_to_uint64("threads", threads, 0, 16384);
-    //     hardware_threads_set(t as u32);
-    // }
-
-    // // 处理块列表
-    // if let Some(block_list) = matches.get_one::<String>("block-list").map(String::as_str) {
-    //     parse_block_list(block_list);
-    // }
+    if let Some(threads_str) = matches.get_one::<String>("threads") {
+        let threads = str_to_uint64("threads", threads_str, 0, u32::MAX as u64) as u32;
+        hardware_threads_set(threads);
+    }
 
     matches
 }
