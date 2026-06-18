@@ -21,7 +21,7 @@ use super::{LzmaSimpleCoder, LzmaSimpleX86, SimpleType};
 fn copy_or_code(
     coder: &mut LzmaSimpleCoder,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
@@ -93,7 +93,7 @@ fn call_filter(coder: &mut LzmaSimpleCoder, buffer: &mut [u8], size: usize) -> u
 fn simple_code(
     coder_ptr: &mut CoderType,
 
-    input: &Vec<u8>,
+    input: &[u8],
     in_pos: &mut usize,
     in_size: usize,
     output: &mut [u8],
