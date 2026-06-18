@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-// use once_cell::sync::Lazy;
-#![allow(unused_variables)]
 #![warn(unused_assignments)]
 use lazy_static::lazy_static;
 use liblzma::{
@@ -20,6 +18,7 @@ use liblzma::{
         lzma_alone_decoder, lzma_alone_encoder, lzma_code, lzma_lzip_decoder, lzma_memusage,
         lzma_properties_decode, lzma_raw_decoder, lzma_raw_decoder_memusage, lzma_raw_encoder,
         lzma_raw_encoder_memusage, lzma_stream_decoder, lzma_stream_encoder,
+        lzma_stream_encoder_mt,
     },
     lzma::lzma_lzma_preset,
 };
@@ -31,9 +30,9 @@ use crate::{
         io_close, io_fix_src_pos, io_open_dest, io_open_src, io_read, io_write, FilePair, IoBuf,
         IO_BUFFER_SIZE,
     },
-    hardware::{hardware_memlimit_get, hardware_threads_is_mt},
+    hardware::{hardware_memlimit_get, hardware_threads_get, hardware_threads_is_mt},
     message::{
-        message, message_filename, message_mem_needed, message_progress_end,
+        message, message_error, message_filename, message_mem_needed, message_progress_end,
         message_progress_start, message_progress_update, message_strm, MessageVerbosity,
     },
     mytime::{mytime_set_start_time, OPT_FLUSH_TIMEOUT},
@@ -576,35 +575,26 @@ pub fn coder_set_compression_settings() {
 }
 
 /// 判断输入数据是否为 XZ 格式
-fn is_format_xz() -> bool {
-    // 指定魔数以兼容 EBCDIC 系统
+fn is_format_xz(in_buf: &IoBuf, avail_in: usize) -> bool {
     const MAGIC: [u8; 6] = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
-    let in_buf = *IN_BUF.lock().unwrap();
-    let strm = STRM.lock().unwrap();
-    strm.avail_in.get() >= MAGIC.len() && in_buf.data[..MAGIC.len()] == MAGIC
+    avail_in >= MAGIC.len() && in_buf.data[..MAGIC.len()] == MAGIC
 }
 
 /// 判断输入数据是否为 LZMA 格式
-fn is_format_lzma() -> bool {
-    // LZMA 头为 13 字节
-    {
-        let strm = STRM.lock().unwrap();
-        if strm.avail_in.get() < 13 {
-            return false;
-        }
+fn is_format_lzma(in_buf: &IoBuf, avail_in: usize) -> bool {
+    if avail_in < 13 {
+        return false;
     }
 
-    // 解码 LZMA1 属性
     let mut filter = LzmaFilter {
         id: LZMA_FILTER_LZMA1,
         options: None,
     };
 
-    if lzma_properties_decode(&mut filter, &IN_BUF.lock().unwrap().data[..5], 5) != LzmaRet::Ok {
+    if lzma_properties_decode(&mut filter, &in_buf.data[..5], 5) != LzmaRet::Ok {
         return false;
     }
 
-    // 过滤假阳性：只允许字典大小为 2^n 或 2^n + 2^(n-1) 或 UINT32_MAX
     if let Some(LzmaOptionsType::LzmaOptionsLzma(opt)) = filter.options {
         let dict_size = opt.dict_size;
         if dict_size != u32::MAX {
@@ -621,10 +611,9 @@ fn is_format_lzma() -> bool {
         }
     }
 
-    // 过滤假阳性：假设已知未压缩大小，必须小于 256 GiB
     let mut uncompressed_size = 0u64;
     for i in 0..8 {
-        uncompressed_size |= (IN_BUF.lock().unwrap().data[5 + i] as u64) << (i * 8);
+        uncompressed_size |= (in_buf.data[5 + i] as u64) << (i * 8);
     }
 
     if uncompressed_size != u64::MAX && uncompressed_size > (1u64 << 38) {
@@ -635,15 +624,13 @@ fn is_format_lzma() -> bool {
 }
 
 /// 判断输入数据是否为 LZIP 格式
-fn is_format_lzip() -> bool {
+fn is_format_lzip(in_buf: &IoBuf, avail_in: usize) -> bool {
     const MAGIC: [u8; 4] = [0x4C, 0x5A, 0x49, 0x50];
-    let in_buf = IN_BUF.lock().unwrap();
-    let strm = STRM.lock().unwrap();
-    strm.avail_in.get() >= MAGIC.len() && in_buf.data[..MAGIC.len()] == MAGIC
+    avail_in >= MAGIC.len() && in_buf.data[..MAGIC.len()] == MAGIC
 }
 
 /// 初始化编码器/解码器
-fn coder_init(pair: &FilePair) -> CoderInitRet {
+fn coder_init(pair: &FilePair, strm: &mut LzmaStream, in_buf: &IoBuf) -> CoderInitRet {
     let mut ret = LzmaRet::ProgError;
 
     // 初始化允许尾部输入标志
@@ -656,16 +643,20 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
                 panic!("自动格式不应在压缩模式下使用");
             }
             FormatType::Xz => {
-                ret = lzma_stream_encoder(
-                    &mut STRM.lock().unwrap(),
-                    &*FILTERS.lock().unwrap(),
-                    CHECK.lock().unwrap().clone(),
-                );
+                let filters = FILTERS.lock().unwrap();
+                let check = CHECK.lock().unwrap().clone();
+                let filters_slice: &[LzmaFilter] = &*filters;
+                if hardware_threads_is_mt() {
+                    ret =
+                        lzma_stream_encoder_mt(strm, filters_slice, check, hardware_threads_get());
+                } else {
+                    ret = lzma_stream_encoder(strm, filters_slice, check);
+                }
             }
             FormatType::Lzma => {
                 let filters = FILTERS.lock().unwrap();
                 if let Some(LzmaOptionsType::LzmaOptionsLzma(ref opt)) = filters[0].options {
-                    ret = lzma_alone_encoder(&mut STRM.lock().unwrap(), opt);
+                    ret = lzma_alone_encoder(strm, opt);
                 } else {
                     panic!("无效的 LZMA 选项");
                 }
@@ -675,7 +666,7 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
                 panic!("LZIP 格式不应在压缩模式下使用");
             }
             FormatType::Raw => {
-                ret = lzma_raw_encoder(&mut STRM.lock().unwrap(), &*FILTERS.lock().unwrap());
+                ret = lzma_raw_encoder(strm, &*FILTERS.lock().unwrap());
             }
         }
     } else {
@@ -701,26 +692,26 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
         match *OPT_FORMAT.lock().unwrap() {
             FormatType::Auto => {
                 // 优先检查 .xz 格式，因为 .lzma 检测更复杂（无魔数）
-                if is_format_xz() {
+                if is_format_xz(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Xz;
-                } else if is_format_lzip() {
+                } else if is_format_lzip(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Lzip;
-                } else if is_format_lzma() {
+                } else if is_format_lzma(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Lzma;
                 }
             }
             FormatType::Xz => {
-                if is_format_xz() {
+                if is_format_xz(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Xz;
                 }
             }
             FormatType::Lzma => {
-                if is_format_lzma() {
+                if is_format_lzma(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Lzma;
                 }
             }
             FormatType::Lzip => {
-                if is_format_lzip() {
+                if is_format_lzip(in_buf, strm.avail_in.get()) {
                     init_format = FormatType::Lzip;
                 }
             }
@@ -736,8 +727,8 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
                     && *OPT_FORCE.lock().unwrap()
                 {
                     // 这些值用于进度信息
-                    STRM.lock().unwrap().total_in.set(0);
-                    STRM.lock().unwrap().total_out.set(0);
+                    strm.total_in.set(0);
+                    strm.total_out.set(0);
                     return CoderInitRet::PassThru;
                 }
 
@@ -745,37 +736,34 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
             }
             FormatType::Xz => {
                 ret = lzma_stream_decoder(
-                    &mut STRM.lock().unwrap(),
+                    strm,
                     hardware_memlimit_get(OperationMode::Decompress),
                     flags,
                 );
             }
             FormatType::Lzma => {
-                ret = lzma_alone_decoder(
-                    &mut STRM.lock().unwrap(),
-                    hardware_memlimit_get(OperationMode::Decompress),
-                );
+                ret = lzma_alone_decoder(strm, hardware_memlimit_get(OperationMode::Decompress));
             }
             FormatType::Lzip => {
                 *ALLOW_TRAILING_INPUT.lock().unwrap() = true;
                 ret = lzma_lzip_decoder(
-                    &mut STRM.lock().unwrap(),
+                    strm,
                     hardware_memlimit_get(OperationMode::Decompress),
                     flags,
                 );
             }
             FormatType::Raw => {
                 // 内存使用已在 coder_set_compression_settings 中检查
-                ret = lzma_raw_decoder(&mut STRM.lock().unwrap(), &*FILTERS.lock().unwrap());
+                ret = lzma_raw_decoder(strm, &*FILTERS.lock().unwrap());
             }
         }
 
         if ret == LzmaRet::Ok && init_format != FormatType::Raw {
-            STRM.lock().unwrap().next_out.borrow_mut().clear();
-            STRM.lock().unwrap().avail_out.set(0);
-            STRM.lock().unwrap().next_out_pos = 0;
+            strm.next_out.borrow_mut().clear();
+            strm.avail_out.set(0);
+            strm.next_out_pos = 0;
             while {
-                ret = lzma_code(&mut STRM.lock().unwrap(), LzmaAction::Run);
+                ret = lzma_code(strm, LzmaAction::Run);
                 ret == LzmaRet::UnsupportedCheck
             } {
                 println!(
@@ -793,10 +781,7 @@ fn coder_init(pair: &FilePair) -> CoderInitRet {
 
     if ret != LzmaRet::Ok {
         if ret == LzmaRet::MemlimitError {
-            message_mem_needed(
-                MessageVerbosity::Error,
-                lzma_memusage(Some(&mut STRM.lock().unwrap())),
-            );
+            message_mem_needed(MessageVerbosity::Error, lzma_memusage(Some(&mut *strm)));
         }
 
         return CoderInitRet::Error;
@@ -854,48 +839,32 @@ fn split_block(block_remaining: &mut u64, next_block_remaining: &mut u64, list_p
 ///
 /// # 返回值
 /// 如果写入成功，返回 `false`；如果写入失败，返回 `true`
-fn coder_write_output(pair: &mut FilePair) -> bool {
-    // OUT_BUF 用处不大，可以尝试删除，这里直接使用 strm.next_out 来获取数据
-    unsafe {
-        // if *OPT_MODE.lock().unwrap() != OperationMode::Test {
-        //     if io_write(
-        //         pair,
-        //         &OUT_BUF.lock().unwrap(),
-        //         IO_BUFFER_SIZE - STRM.lock().unwrap().avail_out.get(),
-        //     ) {
-        //         return true;
-        //     }
-        // }
+fn coder_write_output(pair: &mut FilePair, strm: &mut LzmaStream) -> bool {
+    let written_size = IO_BUFFER_SIZE - strm.avail_out.get();
 
-        if *OPT_MODE.lock().unwrap() != OperationMode::Test {
-            let mut next_out_data = STRM.lock().unwrap().next_out.borrow().to_vec();
-            let written_size = IO_BUFFER_SIZE - STRM.lock().unwrap().avail_out.get();
-
-            // println!("next_out_data: {:?}", &next_out_data[..written_size]);
-
-            let mut io_buf = IoBuf::new();
-            io_buf.data[..written_size].copy_from_slice(&next_out_data[..written_size]);
-
-            if io_write(
-                pair,
-                &io_buf,
-                IO_BUFFER_SIZE - STRM.lock().unwrap().avail_out.get(),
-            ) {
-                return true;
-            }
+    if *OPT_MODE.lock().unwrap() != OperationMode::Test {
+        let next_out_ref = strm.next_out.borrow();
+        if io_write(pair, &next_out_ref[..written_size], written_size) {
+            return true;
         }
-
-        // 重置输出缓冲区的指针和大小
-        let out_buf_data = OUT_BUF.lock().unwrap().data.to_vec();
-        *STRM.lock().unwrap().next_out.borrow_mut() = out_buf_data;
-        STRM.lock().unwrap().avail_out.set(IO_BUFFER_SIZE);
-        STRM.lock().unwrap().next_out_pos = 0;
-        false
     }
+
+    // 复用已有的 Vec，避免每次 to_vec() 分配新内存
+    {
+        let mut next_out = strm.next_out.borrow_mut();
+        next_out.clear();
+        // lzma_code 从位置 0 开始覆盖写入，无需清零
+        unsafe {
+            next_out.set_len(IO_BUFFER_SIZE);
+        }
+    }
+    strm.avail_out.set(IO_BUFFER_SIZE);
+    strm.next_out_pos = 0;
+    false
 }
 
 /// 执行正常的编码/解码操作
-fn coder_normal(pair: &mut FilePair) -> bool {
+fn coder_normal(pair: &mut FilePair, strm: &mut LzmaStream, in_buf: &mut IoBuf) -> bool {
     // 编码器需要知道何时已经提供了所有输入。
     // 解码器在使用 LZMA_CONCATENATED 时也需要知道。
     // 需要在这里检查 src_eof，因为如果是解压缩，第一个输入块已经被读取，
@@ -946,28 +915,37 @@ fn coder_normal(pair: &mut FilePair) -> bool {
         }
     }
 
-    unsafe {
-        let out_buf_data = OUT_BUF.lock().unwrap().data.to_vec();
-        *STRM.lock().unwrap().next_out.borrow_mut() = out_buf_data;
-        STRM.lock().unwrap().avail_out.set(IO_BUFFER_SIZE);
+    {
+        let mut next_out = strm.next_out.borrow_mut();
+        next_out.clear();
+        if next_out.capacity() < IO_BUFFER_SIZE {
+            next_out.resize(IO_BUFFER_SIZE, 0);
+        } else {
+            unsafe {
+                next_out.set_len(IO_BUFFER_SIZE);
+            }
+        }
     }
+    strm.avail_out.set(IO_BUFFER_SIZE);
 
     while !*USER_ABORT.lock().unwrap() {
-        if STRM.lock().unwrap().avail_in.get() == 0 && action == LzmaAction::Run {
+        if strm.avail_in.get() == 0 && action == LzmaAction::Run {
             let read_size = io_read(
                 pair,
-                &mut IN_BUF.lock().unwrap(),
+                in_buf,
                 block_remaining
                     .min(IO_BUFFER_SIZE.try_into().unwrap())
                     .try_into()
                     .unwrap(),
             );
-            // 使用Box::leak来创建静态引用
-            let in_buf_data = Box::leak(IN_BUF.lock().unwrap().data.to_vec().into_boxed_slice());
-            STRM.lock().unwrap().next_in = in_buf_data;
-            STRM.lock().unwrap().avail_in.set(read_size);
+            // 直接使用 in_buf.data 的切片，零拷贝。
+            // 安全性：in_buf 是全局 Mutex 内的 IoBuf，MutexGuard 在 coder_run 期间一直持有。
+            let in_buf_data: &'static [u8] =
+                unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&in_buf.data[..read_size]) };
+            strm.next_in = in_buf_data;
+            strm.avail_in.set(read_size);
 
-            if STRM.lock().unwrap().avail_in.get() == usize::MAX {
+            if strm.avail_in.get() == usize::MAX {
                 break;
             }
 
@@ -975,7 +953,7 @@ fn coder_normal(pair: &mut FilePair) -> bool {
                 action = LzmaAction::Finish;
             } else if block_remaining != u64::MAX {
                 // 每处理完 opt_block_size 字节的输入后，启动一个新块。
-                block_remaining -= STRM.lock().unwrap().avail_in.get() as u64;
+                block_remaining -= strm.avail_in.get() as u64;
                 if block_remaining == 0 {
                     action = LzmaAction::FullBarrier;
                 }
@@ -989,12 +967,13 @@ fn coder_normal(pair: &mut FilePair) -> bool {
         // 让 liblzma 执行实际工作。
         let action_t = action.clone();
 
-        // println!("STRM  {:#?}", STRM.lock().unwrap().internal);
-        ret = lzma_code(&mut STRM.lock().unwrap(), action_t);
+        ret = lzma_code(strm, action_t);
 
-        // 如果输出缓冲区已满，则写出。
-        if STRM.lock().unwrap().avail_out.get() == 0 {
-            if coder_write_output(pair) {
+        // 如果输出缓冲区有数据，则写出。
+        // 使用 < IO_BUFFER_SIZE 来确保对部分填充的缓冲区的刷新，
+        // 这对多线程编码器在进入 Index 和 StreamFooter 阶段前确保有干净的输出缓冲区至关重要。
+        if strm.avail_out.get() < IO_BUFFER_SIZE {
+            if coder_write_output(pair, strm) {
                 break;
             }
         }
@@ -1004,7 +983,7 @@ fn coder_normal(pair: &mut FilePair) -> bool {
         {
             if action == LzmaAction::SyncFlush {
                 // 刷新完成。立即写出待处理的数据，以便读取端可以解压缩所有已压缩的数据。
-                if coder_write_output(pair) {
+                if coder_write_output(pair, strm) {
                     break;
                 }
 
@@ -1037,16 +1016,14 @@ fn coder_normal(pair: &mut FilePair) -> bool {
                 // 即使出现问题，也写出剩余的字节，因为这样用户可以获得尽可能多的数据，
                 // 这在尝试从损坏的文件中获取一些有用数据时可能很有用。
 
-                // println!("stop: STRM.next_out: {:?}", STRM.lock().unwrap().next_out.borrow());
-                // println!("stop: STRM.avail_out: {:?}", STRM.lock().unwrap().avail_out.get());
-                if coder_write_output(pair) {
+                if coder_write_output(pair, strm) {
                     break;
                 }
             }
 
             if ret == LzmaRet::StreamEnd {
                 if *ALLOW_TRAILING_INPUT.lock().unwrap() {
-                    io_fix_src_pos(pair, STRM.lock().unwrap().avail_in.get());
+                    io_fix_src_pos(pair, strm.avail_in.get());
                     success = true;
                     break;
                 }
@@ -1054,27 +1031,20 @@ fn coder_normal(pair: &mut FilePair) -> bool {
                 // 检查是否有尾随垃圾。
                 // 这对于 LZMA_Alone 和原始流是必需的。
                 // 对于 .lz 文件不这样做，因为该格式明确要求允许尾随垃圾。
-                if STRM.lock().unwrap().avail_in.get() == 0 && !pair.src_eof {
+                if strm.avail_in.get() == 0 && !pair.src_eof {
                     // 尝试再读取一个字节。
                     // 希望我们不会获得更多输入，因此 pair->src_eof 变为 true。
 
-                    STRM.lock().unwrap().avail_in.set(io_read(
-                        pair,
-                        &mut IN_BUF.lock().unwrap(),
-                        1,
-                    ));
+                    strm.avail_in.set(io_read(pair, in_buf, 1));
 
-                    if STRM.lock().unwrap().avail_in.get() == usize::MAX {
+                    if strm.avail_in.get() == usize::MAX {
                         break;
                     }
 
-                    assert!(
-                        STRM.lock().unwrap().avail_in.get() == 0
-                            || STRM.lock().unwrap().avail_in.get() == 1
-                    );
+                    assert!(strm.avail_in.get() == 0 || strm.avail_in.get() == 1);
                 }
 
-                if STRM.lock().unwrap().avail_in.get() == 0 {
+                if strm.avail_in.get() == 0 {
                     assert!(pair.src_eof);
                     success = true;
                     break;
@@ -1088,7 +1058,14 @@ fn coder_normal(pair: &mut FilePair) -> bool {
             // 如果到达这里且 stop 为 true，则表示出现问题并打印错误。
             // 否则只是警告，编码可以继续。
             if stop {
-                println!("错误：{:#?}: {}", pair.src_name, message_strm(ret));
+                message_error(
+                    &format!(
+                        "{}: {}",
+                        pair.src_name.as_deref().unwrap_or("(unknown)"),
+                        message_strm(ret)
+                    ),
+                    format_args!(""),
+                );
             } else {
                 println!("警告：{:#?}: {}", pair.src_name, message_strm(ret));
 
@@ -1099,7 +1076,7 @@ fn coder_normal(pair: &mut FilePair) -> bool {
             if ret == LzmaRet::MemlimitError {
                 // 显示实际需要多少内存。
                 message_mem_needed(MessageVerbosity::Error, unsafe {
-                    lzma_memusage(Some(&mut STRM.lock().unwrap()))
+                    lzma_memusage(Some(&mut *strm))
                 });
             }
 
@@ -1117,8 +1094,8 @@ fn coder_normal(pair: &mut FilePair) -> bool {
 
 /// 直通模式处理函数
 /// 将输入数据直接写入输出文件，不进行压缩或解压缩
-fn coder_passthru(pair: &mut FilePair) -> bool {
-    while STRM.lock().unwrap().avail_in.get() != 0 {
+fn coder_passthru(pair: &mut FilePair, strm: &mut LzmaStream, in_buf: &mut IoBuf) -> bool {
+    while strm.avail_in.get() != 0 {
         // 如果用户中断操作，则返回失败
         if *USER_ABORT.lock().unwrap() {
             return false;
@@ -1127,31 +1104,24 @@ fn coder_passthru(pair: &mut FilePair) -> bool {
         // 将输入缓冲区的内容写入输出文件
         if io_write(
             pair,
-            &IN_BUF.lock().unwrap(),
-            STRM.lock().unwrap().avail_in.get(),
+            &in_buf.data[..strm.avail_in.get()],
+            strm.avail_in.get(),
         ) {
             return false;
         }
 
         // 更新已处理的输入和输出字节数 - 使用Cell的方法
-        let current_total = STRM.lock().unwrap().total_in.get();
-        let avail_in = STRM.lock().unwrap().avail_in.get();
-        STRM.lock()
-            .unwrap()
-            .total_in
-            .set(current_total + avail_in as u64);
+        let current_total = strm.total_in.get();
+        let avail_in = strm.avail_in.get();
+        strm.total_in.set(current_total + avail_in as u64);
 
-        let total_in = STRM.lock().unwrap().total_in.get();
-        STRM.lock().unwrap().total_out.set(total_in);
+        let total_in = strm.total_in.get();
+        strm.total_out.set(total_in);
 
         message_progress_update();
 
-        STRM.lock().unwrap().avail_in.set(io_read(
-            pair,
-            &mut IN_BUF.lock().unwrap(),
-            IO_BUFFER_SIZE,
-        ));
-        if STRM.lock().unwrap().avail_in.get() == usize::MAX {
+        strm.avail_in.set(io_read(pair, in_buf, IO_BUFFER_SIZE));
+        if strm.avail_in.get() == usize::MAX {
             return false;
         }
     }
@@ -1161,6 +1131,10 @@ fn coder_passthru(pair: &mut FilePair) -> bool {
 
 /// 运行编码器/解码器
 pub fn coder_run(filename: &str) {
+    // 重置全局编码器状态，确保多文件处理时不会残留上次的状态
+    *STRM.lock().unwrap() = LzmaStream::default();
+    *IN_BUF.lock().unwrap() = IoBuf::new();
+
     // 设置并打印文件名，用于进度信息
     message_filename(filename);
 
@@ -1174,24 +1148,29 @@ pub fn coder_run(filename: &str) {
     // 假设操作会失败
     let mut success = false;
 
+    // 锁定全局编码器状态，在整个文件处理期间持有锁。
+    // 由于 coder_run → coder_init → coder_normal/coder_passthru 是单线程调用链，
+    // 不存在并发访问，持锁不会造成死锁。
+    let mut strm = STRM.lock().unwrap();
+    let mut in_buf = IN_BUF.lock().unwrap();
+
     if *OPT_MODE.lock().unwrap() == OperationMode::Compress {
         // 压缩模式下，初始化输入缓冲区为空
-        STRM.lock().unwrap().next_in = &[];
-        STRM.lock().unwrap().avail_in.set(0);
+        strm.next_in = &[];
+        strm.avail_in.set(0);
     } else {
         // 解压缩模式下，读取第一块输入数据以检测文件类型
-        let read_size = io_read(&mut pair, &mut IN_BUF.lock().unwrap(), IO_BUFFER_SIZE);
-        let in_buf_data = Box::leak(IN_BUF.lock().unwrap().data.to_vec().into_boxed_slice());
-        STRM.lock().unwrap().next_in = in_buf_data;
-        STRM.lock().unwrap().avail_in.set(read_size);
+        let read_size = io_read(&mut pair, &mut in_buf, IO_BUFFER_SIZE);
+        // 直接使用 in_buf.data 的切片，零拷贝
+        let in_buf_data: &'static [u8] =
+            unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&in_buf.data[..read_size]) };
+        strm.next_in = in_buf_data;
+        strm.avail_in.set(read_size);
     }
 
-    // println!("avail_in: {}", STRM.lock().unwrap().avail_in.get());
-    // println!("next_in: {:?}", STRM.lock().unwrap().next_in);
-
-    if STRM.lock().unwrap().avail_in.get() != usize::MAX {
+    if strm.avail_in.get() != usize::MAX {
         // 初始化编码器/解码器，检测文件格式并检查内存使用情况
-        let init_ret = coder_init(&pair);
+        let init_ret = coder_init(&pair, &mut strm, &in_buf);
 
         if init_ret != CoderInitRet::Error && !*USER_ABORT.lock().unwrap() {
             // 测试模式下不打开目标文件
@@ -1208,13 +1187,13 @@ pub fn coder_run(filename: &str) {
                 } else {
                     pair.src_st.st_size as u64
                 };
-                message_progress_start(&mut STRM.lock().unwrap(), is_passthru, in_size);
+                message_progress_start(&mut strm, is_passthru, in_size);
 
                 // 执行实际的编码/解码或直通操作
                 if is_passthru {
-                    success = coder_passthru(&mut pair);
+                    success = coder_passthru(&mut pair, &mut strm, &mut in_buf);
                 } else {
-                    success = coder_normal(&mut pair);
+                    success = coder_normal(&mut pair, &mut strm, &mut in_buf);
                 }
 
                 // 结束进度指示器
